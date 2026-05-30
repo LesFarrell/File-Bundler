@@ -10,28 +10,7 @@
 #include <stdarg.h>
 #include <wchar.h>
 
-#ifdef __TINYC__
-DECLARE_HANDLE(COMPRESSOR_HANDLE);
-typedef COMPRESSOR_HANDLE *PCOMPRESSOR_HANDLE;
-typedef COMPRESSOR_HANDLE DECOMPRESSOR_HANDLE;
-typedef COMPRESSOR_HANDLE *PDECOMPRESSOR_HANDLE;
-
-#define COMPRESS_ALGORITHM_XPRESS 3
-#define COMPRESS_ALGORITHM_XPRESS_HUFF 4
-#ifdef swprintf
-#undef swprintf
-#endif
-#define swprintf _snwprintf
-
-BOOL WINAPI CreateCompressor(DWORD algorithm, PVOID allocation_routines, PCOMPRESSOR_HANDLE compressor_handle);
-BOOL WINAPI Compress(COMPRESSOR_HANDLE compressor_handle, LPCVOID uncompressed_data, SIZE_T uncompressed_data_size, PVOID compressed_buffer, SIZE_T compressed_buffer_size, PSIZE_T compressed_data_size);
-BOOL WINAPI CloseCompressor(COMPRESSOR_HANDLE compressor_handle);
-BOOL WINAPI CreateDecompressor(DWORD algorithm, PVOID allocation_routines, PDECOMPRESSOR_HANDLE decompressor_handle);
-BOOL WINAPI Decompress(DECOMPRESSOR_HANDLE decompressor_handle, LPCVOID compressed_data, SIZE_T compressed_data_size, PVOID uncompressed_buffer, SIZE_T uncompressed_buffer_size, PSIZE_T uncompressed_data_size);
-BOOL WINAPI CloseDecompressor(DECOMPRESSOR_HANDLE decompressor_handle);
-#else
 #include <compressapi.h>
-#endif
 
 #define APP_TITLE L"File Bundler"
 #define BUNDLE_MAGIC "BUNDLE01"
@@ -64,6 +43,7 @@ BOOL WINAPI CloseDecompressor(DECOMPRESSOR_HANDLE decompressor_handle);
 #define IDC_BUILD_BUTTON 1015
 #define IDC_STATUS_EDIT 1016
 
+/* Describes one source file that will be embedded into the output bundle. */
 typedef struct {
     wchar_t *full_path;
     char *relative_utf8;
@@ -73,12 +53,14 @@ typedef struct {
     uint32_t compression_type;
 } FileEntry;
 
+/* Dynamic array of files collected for bundling. */
 typedef struct {
     FileEntry *items;
     size_t count;
     size_t capacity;
 } FileList;
 
+/* Metadata for a file entry as stored in the bundle manifest. */
 typedef struct {
     wchar_t *relative_path;
     uint64_t data_offset;
@@ -87,11 +69,13 @@ typedef struct {
     uint32_t compression_type;
 } ManifestEntry;
 
+/* Generic owned byte buffer used for temporary binary data. */
 typedef struct {
     unsigned char *data;
     size_t size;
 } Buffer;
 
+/* Dynamic array of paths, mainly used to track created directories. */
 typedef struct {
     wchar_t **items;
     size_t count;
@@ -101,18 +85,21 @@ typedef struct {
 /* The footer is stored verbatim at EOF, so its packed layout is part of the
    on-disk bundle format contract. */
 #pragma pack(push, 1)
+/* Fixed-size footer written at the end of each bundle file. */
 typedef struct {
     char magic[8];
     uint32_t version;
     uint64_t manifest_offset;
 } BundleFooter;
 
+/* Header from a standard ICO file directory. */
 typedef struct {
     WORD idReserved;
     WORD idType;
     WORD idCount;
 } IconDirHeader;
 
+/* One image record inside an ICO file directory. */
 typedef struct {
     BYTE bWidth;
     BYTE bHeight;
@@ -124,12 +111,14 @@ typedef struct {
     DWORD dwImageOffset;
 } IconDirEntry;
 
+/* Header for the grouped icon resource stored in the PE resources section. */
 typedef struct {
     WORD idReserved;
     WORD idType;
     WORD idCount;
 } GrpIconDirHeader;
 
+/* One grouped icon resource entry that points at an RT_ICON resource id. */
 typedef struct {
     BYTE bWidth;
     BYTE bHeight;
@@ -142,6 +131,7 @@ typedef struct {
 } GrpIconDirEntry;
 #pragma pack(pop)
 
+/* Cached HWND handles for the main builder window controls. */
 typedef struct {
     HWND source_edit;
     HWND startup_edit;
@@ -157,6 +147,7 @@ typedef struct {
     HWND build_button;
 } UiState;
 
+/* Result of locating an icon resource by either numeric id or string name. */
 typedef struct {
     BOOL found;
     BOOL is_integer;
@@ -492,6 +483,7 @@ static BOOL pack_file_data(const wchar_t *path, uint32_t requested_compression_m
         return FALSE;
     }
 
+    /* Store mode and empty files bypass the compression API entirely. */
     if (original.size == 0 || requested_compression_mode == BUILDER_COMPRESSION_STORE) {
         *compression_type_out = BUNDLE_COMPRESSION_NONE;
         *stored = original;
@@ -510,6 +502,8 @@ static BOOL pack_file_data(const wchar_t *path, uint32_t requested_compression_m
         free_buffer(&original);
         return FALSE;
     }
+    /* The bundle format is per-file, so we only keep a compressed payload when
+       it is actually smaller than the source bytes. */
     if (compressed.size < original.size) {
         *compression_type_out = compressed_type;
         *stored = compressed;
@@ -586,9 +580,13 @@ static BOOL path_is_within_directory(const wchar_t *path, const wchar_t *directo
     wchar_t full_path[PATH_BUFFER_CHARS];
     wchar_t full_directory[PATH_BUFFER_CHARS];
     size_t directory_len;
+    DWORD full_path_len;
+    DWORD full_directory_len;
 
-    if (!GetFullPathNameW(path, (DWORD)_countof(full_path), full_path, NULL) ||
-        !GetFullPathNameW(directory, (DWORD)_countof(full_directory), full_directory, NULL)) {
+    full_path_len = GetFullPathNameW(path, (DWORD)_countof(full_path), full_path, NULL);
+    full_directory_len = GetFullPathNameW(directory, (DWORD)_countof(full_directory), full_directory, NULL);
+    if (!full_path_len || full_path_len >= _countof(full_path) ||
+        !full_directory_len || full_directory_len >= _countof(full_directory)) {
         return FALSE;
     }
 
@@ -606,14 +604,18 @@ static BOOL path_is_within_directory(const wchar_t *path, const wchar_t *directo
 
 static BOOL build_path_within_directory(const wchar_t *directory, const wchar_t *relative_path, wchar_t *buffer, size_t buffer_count) {
     wchar_t combined[PATH_BUFFER_CHARS];
+    DWORD result_len;
 
     if (!directory || !relative_path || !buffer || buffer_count == 0) {
         return FALSE;
     }
     swprintf(combined, _countof(combined), L"%ls\\%ls", directory, relative_path);
-    if (!GetFullPathNameW(combined, (DWORD)buffer_count, buffer, NULL)) {
+    result_len = GetFullPathNameW(combined, (DWORD)buffer_count, buffer, NULL);
+    if (!result_len || result_len >= buffer_count) {
         return FALSE;
     }
+    /* Normalize the joined path first, then verify it still resolves under the
+       intended base directory. */
     return path_is_within_directory(buffer, directory);
 }
 
@@ -691,6 +693,8 @@ static BOOL read_manifest_header(FILE *file, const BundleFooter *footer, uint32_
     uint32_t startup_len = 0;
     uint32_t runtime_options = 0;
 
+    /* The footer only tells us where the manifest starts; the fixed-size header
+       gives the loader enough information to read the rest safely. */
     if (_fseeki64(file, (int64_t)footer->manifest_offset, SEEK_SET) != 0) {
         return FALSE;
     }
@@ -828,6 +832,8 @@ static BOOL extract_manifest_entry(FILE *bundle_file, const wchar_t *target_dir,
         return FALSE;
     }
 
+    /* Manifest paths are treated as untrusted input, so every target path must
+       be resolved back under the chosen extraction directory. */
     if (!build_path_within_directory(target_dir, entry->relative_path, output_path, _countof(output_path))) {
         return FALSE;
     }
@@ -1214,6 +1220,8 @@ static BOOL run_bundled_mode(HINSTANCE instance) {
     if (!GetModuleFileNameW(NULL, exe_path, _countof(exe_path))) {
         return FALSE;
     }
+    /* The same executable acts as both builder and launcher. If no footer is
+       present, startup falls through to the GUI path instead. */
     if (!read_bundle_footer(exe_path, &footer)) {
         return FALSE;
     }
@@ -1223,6 +1231,8 @@ static BOOL run_bundled_mode(HINSTANCE instance) {
     keep_files = (runtime_options & BUNDLE_OPTION_KEEP_FILES) != 0;
     extract_to_temp = (runtime_options & BUNDLE_OPTION_EXTRACT_TO_TEMP) != 0;
 
+    /* Temp extraction keeps the bundle directory clean for apps that unpack a
+       larger working tree or write extra files beside the child process. */
     if (extract_to_temp) {
         if (!get_temp_extract_directory(extract_dir, _countof(extract_dir))) {
             MessageBoxW(NULL, L"Could not create a temp extraction folder.", APP_TITLE, MB_ICONERROR);
@@ -1279,6 +1289,8 @@ static BOOL run_bundled_mode(HINSTANCE instance) {
         free_path_list(&created_dirs);
         return TRUE;
     }
+    /* In keep-files mode the child runs independently and the extracted tree is
+       left in place for the user to inspect or reuse. */
     if (keep_files) {
         close_process_handles(&pi);
         free_path_list(&created_dirs);
@@ -1440,6 +1452,8 @@ static BOOL build_bundle(HWND window) {
     GetWindowTextW(g_ui.output_name_edit, output_name, _countof(output_name));
     GetWindowTextW(g_ui.icon_edit, icon, _countof(icon));
     builder_compression_mode = get_builder_compression_mode();
+    /* Runtime options are persisted into the manifest so the generated bundle
+       knows how to extract and clean up when it is launched later. */
     if (SendMessageW(g_ui.keep_files_check, BM_GETCHECK, 0, 0) == BST_CHECKED) {
         runtime_options |= BUNDLE_OPTION_KEEP_FILES;
     }
@@ -1559,6 +1573,8 @@ static BOOL build_bundle(HWND window) {
         goto cleanup;
     }
 
+    /* The builder appends payload bytes first, then writes the manifest and the
+       fixed footer at EOF once all file offsets are known. */
     for (i = 0; i < files.count; ++i) {
         Buffer stored = {0};
         double saved_percent = 0.0;
@@ -1733,14 +1749,25 @@ static BOOL bundle_name_conflicts_with_bundled_file(const wchar_t *bundle_name, 
 }
 
 static BOOL get_state_file_path(wchar_t *buffer, size_t buffer_count) {
-    if (!GetModuleFileNameW(NULL, buffer, (DWORD)buffer_count)) {
+    DWORD path_len;
+    size_t current_len;
+
+    path_len = GetModuleFileNameW(NULL, buffer, (DWORD)buffer_count);
+    if (!path_len || path_len >= buffer_count) {
         return FALSE;
     }
+    current_len = wcslen(buffer);
     {
         wchar_t *dot = wcsrchr(buffer, L'.');
         if (dot) {
+            if ((size_t)(dot - buffer) + wcslen(L".ini") + 1 > buffer_count) {
+                return FALSE;
+            }
             wcscpy(dot, L".ini");
         } else {
+            if (current_len + wcslen(L".ini") + 1 > buffer_count) {
+                return FALSE;
+            }
             wcscat(buffer, L".ini");
         }
     }
@@ -1876,6 +1903,8 @@ static void create_child_controls(HWND window) {
     g_ui.keep_files_check = CreateWindowW(L"BUTTON", L"Keep extracted files after run", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 248, 260, 22, window, (HMENU)IDC_KEEP_FILES_CHECK, NULL, NULL);
     g_ui.extract_to_temp_check = CreateWindowW(L"BUTTON", L"Extract to a temp folder and run from there", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 274, 320, 22, window, (HMENU)IDC_EXTRACT_TO_TEMP_CHECK, NULL, NULL);
 
+    /* Compression selection controls how payload bytes are packed into the
+       bundle; files that do not shrink still fall back to raw storage. */
     CreateWindowW(L"STATIC", L"Compression Mode", WS_CHILD | WS_VISIBLE, 16, 308, 180, 20, window, NULL, NULL, NULL);
     g_ui.compression_store_radio = CreateWindowW(L"BUTTON", L"Store only", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 16, 330, 120, 22, window, (HMENU)IDC_COMPRESSION_STORE_RADIO, NULL, NULL);
     g_ui.compression_xpress_radio = CreateWindowW(L"BUTTON", L"XPRESS", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 150, 330, 100, 22, window, (HMENU)IDC_COMPRESSION_XPRESS_RADIO, NULL, NULL);

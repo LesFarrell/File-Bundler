@@ -8,6 +8,10 @@ It operates in two modes:
 
 ## Build
 
+Use either the existing Zig batch build or the new Premake5 project generator.
+
+### Zig batch build
+
 Run:
 
 ```bat
@@ -20,6 +24,29 @@ The build script:
 2. Compiles the icon resource into `application.res`.
 3. Builds a 64-bit `file_bundler.exe` with Zig (`x86_64-windows-gnu`) and links the Windows GUI libraries it needs, including `Cabinet` for the Windows Compression API.
 4. Runs a post-build strip step with `strip.exe` or `llvm-strip.exe` when one is available on `PATH`.
+
+### Premake5 build generation
+
+Generate project files with Premake5:
+
+```bat
+premake5 vs2022
+```
+
+Or generate GNU Make files for a MinGW-style toolchain:
+
+```bat
+premake5 gmake
+```
+
+The Premake script in [premake5.lua](/abs/c:/Users/Les%20Farrell/OneDrive/playing%20(1)/file_bundler/premake5.lua) generates a 64-bit Windows GUI build that:
+
+1. Compiles `file_bundler.c` together with `application.rc`.
+2. Uses Unicode entry points and settings so `wWinMain()` remains the program entry path.
+3. Links the same Windows libraries as the Zig build: `cabinet`, `shell32`, `comdlg32`, `ole32`, `gdi32`, and `user32`.
+4. Tunes Release builds for minimum size with size optimization, link-time optimization, and toolchain-specific dead-code stripping.
+
+Release builds output `file_bundler.exe` in the repo root. Debug builds output `file_bundler_debug.exe`.
 
 ## User Flow
 

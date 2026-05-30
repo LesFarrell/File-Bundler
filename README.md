@@ -20,7 +20,6 @@ The same executable runs in two modes:
 ## Project Files
 
 - [file_bundler.c](file_bundler.c): application code, bundle writer/reader, extraction logic, and Win32 GUI
-- [build_File_Bundler.bat](build_File_Bundler.bat): Zig-based one-step build
 - [premake5.lua](premake5.lua): Premake project generator for Visual Studio or MinGW-style builds
 - [application.ico](application.ico): default application icon
 - [application.rc](application.rc): Windows resource script
@@ -28,28 +27,11 @@ The same executable runs in two modes:
 ## Requirements
 
 - Windows
-- One of:
-  - Zig, for the batch build
-  - Premake5 plus a supported compiler toolchain, for generated projects
+- Premake5 plus a supported compiler toolchain, for generated projects
 
 The program depends on standard Win32 libraries plus `cabinet` for the Windows Compression API.
 
 ## Build
-
-### Zig batch build
-
-Run:
-
-```bat
-build_File_Bundler.bat
-```
-
-The script:
-
-1. Creates `application.rc` if it does not already exist.
-2. Compiles the icon resource into `application.res`.
-3. Builds a 64-bit GUI executable with Zig targeting `x86_64-windows-gnu`.
-4. Runs `strip` or `llvm-strip` if one is available on `PATH`.
 
 ### Premake5
 

@@ -28,7 +28,6 @@ project "file_bundler"
         "shell32",
         "comdlg32",
         "ole32",
-        "gdi32",
         "user32",
     }
 

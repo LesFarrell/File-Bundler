@@ -1,14 +1,40 @@
 # File Bundler
 
-`file_bundler.exe` is a native Windows packer/launcher written in C.
-It operates in two modes:
+`file_bundler.exe` is a native Win32 packer/launcher written in C.
 
-- Builder mode: shows a GUI that copies the current EXE, appends bundled file data, writes a manifest, and finishes with a footer.
-- Bundled mode: detects the footer on startup, extracts the appended files beside the EXE, optionally launches a configured inner EXE, and may clean the extracted files back up afterward.
+The same executable runs in two modes:
+
+- Builder mode: shows a GUI, copies itself, appends bundled file data, writes a manifest, and finishes with a footer.
+- Bundled mode: detects that footer on startup, extracts the embedded files, optionally launches a bundled EXE, and may clean the extracted files up afterward.
+
+## What It Does
+
+- Bundles an entire folder into a single Windows `.exe`
+- Optionally launches one bundled `.exe` after extraction
+- Supports `Store only`, `XPRESS`, and `XPRESS_HUFF` compression
+- Can extract either beside the bundle or into a temporary folder
+- Can keep extracted files or delete them after the launched process exits
+- Can apply a custom icon from an `.ico` or copy an icon from another `.exe`
+- Persists the builder UI state in an `.ini` file beside the executable
+
+## Project Files
+
+- [file_bundler.c](file_bundler.c): application code, bundle writer/reader, extraction logic, and Win32 GUI
+- [build_File_Bundler.bat](build_File_Bundler.bat): Zig-based one-step build
+- [premake5.lua](premake5.lua): Premake project generator for Visual Studio or MinGW-style builds
+- [application.ico](application.ico): default application icon
+- [application.rc](application.rc): Windows resource script
+
+## Requirements
+
+- Windows
+- One of:
+  - Zig, for the batch build
+  - Premake5 plus a supported compiler toolchain, for generated projects
+
+The program depends on standard Win32 libraries plus `cabinet` for the Windows Compression API.
 
 ## Build
-
-Use either the existing Zig batch build or the new Premake5 project generator.
 
 ### Zig batch build
 
@@ -18,103 +44,99 @@ Run:
 build_File_Bundler.bat
 ```
 
-The build script:
+The script:
 
-1. Generates `application.rc` if it does not exist.
+1. Creates `application.rc` if it does not already exist.
 2. Compiles the icon resource into `application.res`.
-3. Builds a 64-bit `file_bundler.exe` with Zig (`x86_64-windows-gnu`) and links the Windows GUI libraries it needs, including `Cabinet` for the Windows Compression API.
-4. Runs a post-build strip step with `strip.exe` or `llvm-strip.exe` when one is available on `PATH`.
+3. Builds a 64-bit GUI executable with Zig targeting `x86_64-windows-gnu`.
+4. Runs `strip` or `llvm-strip` if one is available on `PATH`.
 
-### Premake5 build generation
+### Premake5
 
-Generate project files with Premake5:
+Generate Visual Studio 2022 files:
 
 ```bat
 premake5 vs2022
 ```
 
-Or generate GNU Make files for a MinGW-style toolchain:
+Generate GNU Make files:
 
 ```bat
 premake5 gmake
 ```
 
-The Premake script in [premake5.lua](/abs/c:/Users/Les%20Farrell/OneDrive/playing%20(1)/file_bundler/premake5.lua) generates a 64-bit Windows GUI build that:
+The Premake configuration:
 
-1. Compiles `file_bundler.c` together with `application.rc`.
-2. Uses Unicode entry points and settings so `wWinMain()` remains the program entry path.
-3. Links the same Windows libraries as the Zig build: `cabinet`, `shell32`, `comdlg32`, `ole32`, `gdi32`, and `user32`.
-4. Tunes Release builds for minimum size with size optimization, link-time optimization, and toolchain-specific dead-code stripping.
+- builds a 64-bit Windows GUI executable
+- compiles `file_bundler.c` together with the resource file
+- keeps `wWinMain()` as the Unicode entry point
+- links `cabinet`, `shell32`, `comdlg32`, `ole32`, and `user32`
+- tunes Release builds for smaller output
 
 Release builds output `file_bundler.exe` in the repo root. Debug builds output `file_bundler_debug.exe`.
 
-## User Flow
+## How To Use
 
 1. Start `file_bundler.exe`.
 2. Choose a source folder.
-3. Optionally choose a startup EXE inside that folder.
+3. Optionally choose a startup EXE relative to that source folder.
 4. Choose an output folder and bundle name.
-5. Optionally choose whether the bundle should extract into a temp folder and launch from there.
-6. Choose the compression mode the builder should use: `Store only`, `XPRESS`, or `XPRESS_HUFF`.
-7. Optionally choose a custom `.ico` file or an `.exe` whose original icon should be copied to the generated bundle.
+5. Optionally choose whether extraction should happen in a temp folder.
+6. Choose a compression mode.
+7. Optionally choose a custom icon source.
 8. Click `Build Bundle`.
 
-## Developer Overview
+## Builder Rules
 
-The code in [file_bundler.c](/abs/c:/development/testing/playing/file_bundler/file_bundler.c) is organized around a few main responsibilities:
+- The source folder must exist and contain at least one file.
+- The output folder must exist.
+- The bundle name must be a valid Windows filename.
+- The output bundle must be outside the source folder.
+- The startup EXE, if set, must:
+  - be a relative path
+  - point to an `.exe`
+  - stay inside the source folder
+- The bundle name cannot match:
+  - the configured startup EXE name
+  - a bundled root-level EXE name that would collide during extraction
+- The icon source, if set, must be an existing `.ico` or `.exe`.
 
-- Data model and helpers: path conversion, file list management, manifest parsing, compression, and file I/O helpers.
-- Builder path: `build_bundle()` gathers files, copies the stub EXE, optionally rewrites icon resources, appends file payloads, writes the manifest, and appends the footer.
-- Launcher path: `run_bundled_mode()` checks for a valid footer. If one exists, it extracts files, launches the configured startup EXE if present, and performs cleanup depending on the saved options.
-- GUI path: `create_child_controls()`, `main_wnd_proc()`, and the small settings helpers manage the Win32 interface and persist the last-used values in an `.ini` file beside the EXE.
-
-## Key Structures
-
-These are the core record types used by the format and runtime:
-
-- `FileEntry`: one source file during bundle creation. Stores the original path, UTF-8 relative path, file sizes, data offset, and compression type.
-- `ManifestEntry`: one file record loaded back out of the manifest during extraction.
-- `Buffer`: generic byte buffer used for file loads and compression output.
-- `BundleFooter`: the fixed-size trailer at the end of the EXE. It identifies the file as a bundle and tells the loader where the manifest starts.
-
-The icon-related structs are just in-memory views of `.ico` and grouped icon resource headers used by the icon-copy helpers.
+If no icon source is selected and a startup EXE is configured, the builder tries to inherit the startup EXE's icon automatically.
 
 ## Runtime Behavior
 
-### Builder mode
+`wWinMain()` first calls `run_bundled_mode()`. If no valid bundle footer is present, the program falls through into the builder GUI.
 
-`wWinMain()` first calls `run_bundled_mode()`. If no valid footer is found, execution falls through into the GUI.
+When running as a bundle:
 
-When `build_bundle()` runs, it:
+1. The loader reads the footer at EOF.
+2. It reads the manifest and runtime option flags.
+3. It extracts files either beside the bundle or into a unique temp folder.
+4. If no startup EXE was stored, it stops after extraction and shows the destination folder.
+5. If a startup EXE was stored, it launches it with the extraction folder as the working directory.
+6. If `keep_files` is off, cleanup runs after the child process exits.
+7. If `keep_files` is on, the extracted files are left in place.
 
-1. Reads the UI values and validates them.
-2. Recursively enumerates every file under the selected source folder.
-3. Copies the current `file_bundler.exe` to the output location. This copied EXE becomes the stub/launcher.
-4. Optionally rewrites the icon resources in the copied EXE from an `.ico` file or from another executable's grouped icon resources. If you leave the icon source blank and choose a startup EXE, the bundle now tries to inherit that startup EXE's original icon automatically.
-5. Packs each bundled file with the selected compression mode. `Store only` writes files raw, while `XPRESS` and `XPRESS_HUFF` only keep the compressed payload when it is smaller than the original.
-6. Writes the manifest after the payload region, including runtime option flags such as `keep_files` and `extract_to_temp`.
-7. Appends a `BundleFooter` so future launches can locate the manifest quickly.
+Cleanup behavior depends on extraction mode:
 
-The output is a copy of the builder executable with payload bytes, manifest data, and the footer appended to the end.
+- Temp extraction: the temp directory is deleted recursively.
+- Extraction beside the bundle: files listed in the manifest are deleted, empty parent directories are removed, and extraction-created directories are cleaned up.
 
-Compression is per-file. The current implementation supports:
+## Compression
 
-- `0`: no compression
-- `1`: Windows `XPRESS_HUFF`
-- `2`: Windows `XPRESS`
+Builder UI modes:
 
-`pack_file_data()` uses the compression mode selected in the builder. For `XPRESS` and `XPRESS_HUFF`, it only keeps the compressed form if it is smaller than the original. Files that do not benefit are stored raw.
+- `Store only`
+- `XPRESS`
+- `XPRESS_HUFF`
 
-### Bundled mode
+Compression is applied per file. For `XPRESS` and `XPRESS_HUFF`, the builder only keeps the compressed payload when it is smaller than the original file. Otherwise that file is stored raw.
 
-If `run_bundled_mode()` finds a valid footer:
+On-disk bundle compression codes are:
 
-1. It opens the EXE and reads the manifest from the recorded offset.
-2. It extracts bundled files either into the same folder as the EXE or into a unique temp folder, depending on the saved runtime options.
-3. If no startup EXE was recorded, it stops after extraction and shows the destination folder.
-4. If a startup EXE was recorded, it launches it with the extraction folder as the working directory.
-5. If `keep_files` is false, it waits for the child process to exit and then deletes the extracted files.
-6. If `keep_files` is true, it leaves the extracted files in place and exits without cleanup.
+- `0`: uncompressed
+- `1`: `XPRESS_HUFF`
+- `2`: `XPRESS`
 
 ## Bundle Format
 
@@ -131,7 +153,7 @@ The bundle is appended directly to the end of the launcher EXE:
 
 ### Footer
 
-The last bytes of the file are always:
+The file always ends with:
 
 ```c
 typedef struct {
@@ -141,11 +163,11 @@ typedef struct {
 } BundleFooter;
 ```
 
-The loader seeks to `sizeof(BundleFooter)` bytes from EOF, verifies the `BUNDLE01` magic/version, and then jumps to `manifest_offset`.
+The loader seeks backward from EOF by `sizeof(BundleFooter)`, verifies the magic and version, and then jumps to `manifest_offset`.
 
-### Manifest layout
+### Manifest Layout
 
-The manifest begins at `BundleFooter.manifest_offset` and is written in this order:
+The manifest is written in this order:
 
 1. `uint32_t version`
 2. `uint32_t file_count`
@@ -154,10 +176,10 @@ The manifest begins at `BundleFooter.manifest_offset` and is written in this ord
 5. `startup_len` bytes of UTF-8 startup path, if present
 6. `file_count` file records
 
-Current runtime option bits:
+Runtime option bits:
 
 - `0x1`: keep extracted files after the child process exits
-- `0x2`: extract into a unique temp folder and launch from there
+- `0x2`: extract into a unique temp folder
 
 Each file record is:
 
@@ -170,29 +192,17 @@ Each file record is:
 
 Notes:
 
-- `data_offset` points to the file payload earlier in the EXE, not to data inside the manifest.
-- `file_size` is the original uncompressed size.
-- `stored_size` is the byte count actually written to the EXE.
-- For `compression_type == 0`, `stored_size` must match `file_size`.
-- Relative paths are stored in UTF-8 and reconstructed to wide strings during extraction.
-
-### XPRESS_HUFF format
-
-Compressed files use `compression_type == 1`, which means the payload was compressed with the Windows Compression API in buffer mode using `COMPRESS_ALGORITHM_XPRESS_HUFF`.
-
-Compressed files with `compression_type == 2` use `COMPRESS_ALGORITHM_XPRESS`.
-
-## Extraction and Cleanup Notes
-
-- Extraction can target either the directory containing the bundle EXE or a unique temp directory, depending on the saved runtime options.
-- The startup EXE path is stored relative to the source folder so the same layout works after extraction.
-- Cleanup is path-driven: the loader deletes each extracted file listed in the manifest and then removes empty parent directories.
-- Cleanup now also removes any directories that were created during extraction, recursively deleting extra files and subfolders the launched app wrote inside those extraction-created directories.
-- If no startup EXE is configured, extracted files are left in place because there is no child process to wait on and no cleanup pass is triggered.
+- `data_offset` points into the payload region earlier in the EXE.
+- `file_size` is the original size.
+- `stored_size` is the byte count actually stored.
+- `compression_type == 0` means `stored_size == file_size`.
+- Relative paths are stored as UTF-8 and converted back to wide strings during extraction.
 
 ## Persisted State
 
-Builder UI state is saved in an `.ini` file beside the executable. The `builder` section stores:
+The builder stores UI state in an `.ini` file beside the executable under the `[builder]` section.
+
+Keys:
 
 - `source`
 - `startup`
@@ -203,12 +213,10 @@ Builder UI state is saved in an `.ini` file beside the executable. The `builder`
 - `extract_to_temp`
 - `compression_mode`
 
-## Things To Watch When Modifying It
+## Development Notes
 
-- The footer and manifest layout are the contract between builder mode and bundled mode. If either changes, both writer and reader must be updated together.
-- Extraction treats manifest metadata as untrusted. Size conversions and decompression bounds checks should stay strict.
-- `#pragma pack(push, 1)` on the footer/resource structs matters. Removing it changes the on-disk binary layout.
-- `run_bundled_mode()` is intentionally called before the GUI is created. That is what makes the same EXE act as both builder and launcher.
-- The program enters through `wWinMain()` and funnels startup into the shared `app_main()` path.
-- `apply_icon_to_exe()` edits PE resources in-place on the copied EXE. It does not modify the original running executable.
-- Path handling is wide-char on Windows, but manifest paths are stored as UTF-8. Changes around conversion need to preserve that boundary carefully.
+- The footer and manifest layout are the contract between builder mode and bundled mode. Change both sides together.
+- `#pragma pack(push, 1)` on the footer and icon/resource structs matters because those layouts are written to disk or mapped onto binary resource data.
+- `apply_icon_to_exe()` only edits the copied output EXE, not the running builder executable.
+- Path handling is wide-char in the app, but manifest paths are stored as UTF-8.
+- Extraction code treats manifest metadata as untrusted input. Keep size checks and path-boundary checks strict.

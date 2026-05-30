@@ -12,7 +12,7 @@ if not exist application.rc (
 )
 zig rc application.rc application.res
 if errorlevel 1 exit /b 1
-zig cc -target x86_64-windows-gnu -Oz -s -municode "-Wl,--subsystem,windows" -DUNICODE -D_UNICODE -o file_bundler.exe file_bundler.c application.res -lcabinet -lshell32 -lcomdlg32 -lole32 -lgdi32 -luser32
+zig cc -target x86_64-windows-gnu -Oz -s -municode "-Wl,--subsystem,windows" -DUNICODE -D_UNICODE -o file_bundler.exe file_bundler.c application.res -lcabinet -lshell32 -lcomdlg32 -lole32 -luser32
 if errorlevel 1 exit /b 1
 if defined STRIP_EXE (
     "%STRIP_EXE%" file_bundler.exe

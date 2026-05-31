@@ -1,6 +1,6 @@
 # File Bundler
 
-`file_bundler.exe` is a native Win32 packer/launcher written in C.
+`FileBundler.exe` is a native Win32 packer/launcher written in C.
 
 The same executable runs in two modes:
 
@@ -14,7 +14,8 @@ The same executable runs in two modes:
 - Supports `Store only`, `XPRESS`, and `XPRESS_HUFF` compression
 - Can extract either beside the bundle or into a temporary folder
 - Can keep extracted files or delete them after the launched process exits
-- Can apply a custom icon from an `.ico` or copy an icon from another `.exe`
+- Can apply a custom icon from an `.ico`
+- If no custom `.ico` is selected, inherits the startup EXE icon when one is configured
 - Persists the builder UI state in an `.ini` file beside the executable
 
 ## Project Files
@@ -47,6 +48,14 @@ Generate GNU Make files:
 premake5 gmake
 ```
 
+Build with Zig:
+
+```bat
+build_zig.bat
+```
+
+This builds the executable directly with `zig cc` as a Windows GUI application.
+
 The Premake configuration:
 
 - builds a 64-bit Windows GUI executable
@@ -55,11 +64,11 @@ The Premake configuration:
 - links `cabinet`, `shell32`, `comdlg32`, `ole32`, and `user32`
 - tunes Release builds for smaller output
 
-Release builds output `file_bundler.exe` in the repo root. Debug builds output `file_bundler_debug.exe`.
+Builds output `FileBundler.exe` in the repo root.
 
 ## How To Use
 
-1. Start `file_bundler.exe`.
+1. Start `FileBundler.exe`.
 2. Choose a source folder.
 3. Optionally choose a startup EXE relative to that source folder.
 4. Choose an output folder and bundle name.
@@ -81,9 +90,9 @@ Release builds output `file_bundler.exe` in the repo root. Debug builds output `
 - The bundle name cannot match:
   - the configured startup EXE name
   - a bundled root-level EXE name that would collide during extraction
-- The icon source, if set, must be an existing `.ico` or `.exe`.
+- The icon source, if set, must be an existing `.ico`.
 
-If no icon source is selected and a startup EXE is configured, the builder tries to inherit the startup EXE's icon automatically.
+If no icon source is selected and a startup EXE is configured, the builder uses the startup EXE's icon automatically.
 
 ## Runtime Behavior
 

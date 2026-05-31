@@ -732,6 +732,12 @@ static uint32_t get_builder_compression_mode(void)
 
 static void set_builder_compression_mode(uint32_t compression_mode)
 {
+    if (compression_mode != BUILDER_COMPRESSION_STORE &&
+        compression_mode != BUILDER_COMPRESSION_XPRESS)
+    {
+        compression_mode = BUILDER_COMPRESSION_XPRESS_HUFF;
+    }
+
     SendMessageW(g_ui.compression_store_radio, BM_SETCHECK,
                  compression_mode == BUILDER_COMPRESSION_STORE ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_ui.compression_xpress_radio, BM_SETCHECK,
@@ -1768,9 +1774,9 @@ static BOOL build_bundle(HWND window)
         MessageBoxW(window, L"The icon source could not be found.", APP_TITLE, MB_ICONWARNING);
         return FALSE;
     }
-    if (icon[0] != L'\0' && !path_has_extension(icon, L".ico") && !path_has_extension(icon, L".exe"))
+    if (icon[0] != L'\0' && !path_has_extension(icon, L".ico"))
     {
-        MessageBoxW(window, L"Icon source must be an .ico or .exe file.", APP_TITLE, MB_ICONWARNING);
+        MessageBoxW(window, L"Custom icon source must be an .ico file.", APP_TITLE, MB_ICONWARNING);
         return FALSE;
     }
     if (!GetModuleFileNameW(NULL, self_path, _countof(self_path)))
@@ -2256,10 +2262,10 @@ static void create_child_controls(HWND window)
        bundle; files that do not shrink still fall back to raw storage. */
     CreateWindowW(L"STATIC", L"Compression level", WS_CHILD | WS_VISIBLE, 16, 308, 180, 20, window, NULL, NULL, NULL);
     g_ui.compression_store_radio = CreateWindowW(L"BUTTON", L"Store only", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 16, 330, 120, 22, window, (HMENU)IDC_COMPRESSION_STORE_RADIO, NULL, NULL);
-    g_ui.compression_xpress_radio = CreateWindowW(L"BUTTON", L"XPRESS", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 150, 330, 100, 22, window, (HMENU)IDC_COMPRESSION_XPRESS_RADIO, NULL, NULL);
-    g_ui.compression_xpress_huff_radio = CreateWindowW(L"BUTTON", L"XPRESS_HUFF", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 264, 330, 150, 22, window, (HMENU)IDC_COMPRESSION_XPRESS_HUFF_RADIO, NULL, NULL);
+    g_ui.compression_xpress_radio = CreateWindowW(L"BUTTON", L"Quick", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 150, 330, 100, 22, window, (HMENU)IDC_COMPRESSION_XPRESS_RADIO, NULL, NULL);
+    g_ui.compression_xpress_huff_radio = CreateWindowW(L"BUTTON", L"Best", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 264, 330, 150, 22, window, (HMENU)IDC_COMPRESSION_XPRESS_HUFF_RADIO, NULL, NULL);
 
-    CreateWindowW(L"STATIC", L"Bundle icon (.ico or .exe, optional)", WS_CHILD | WS_VISIBLE, 16, 364, 250, 20, window, NULL, NULL, NULL);
+    CreateWindowW(L"STATIC", L"Bundle icon (.ico, optional)", WS_CHILD | WS_VISIBLE, 16, 364, 250, 20, window, NULL, NULL, NULL);
     g_ui.icon_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 16, 386, 600, 24, window, (HMENU)IDC_ICON_EDIT, NULL, NULL);
     CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE, 626, 384, 110, 24, window, (HMENU)IDC_ICON_BROWSE, NULL, NULL);
 
@@ -2303,7 +2309,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND window, UINT message, WPARAM wparam, 
         case IDC_ICON_BROWSE:
         {
             wchar_t path[MAX_PATH * 4];
-            if (pick_open_file(window, L"Icon Sources (*.ico;*.exe)\0*.ico;*.exe\0Icon Files (*.ico)\0*.ico\0Executable Files (*.exe)\0*.exe\0All Files (*.*)\0*.*\0", NULL, path, _countof(path)))
+            if (pick_open_file(window, L"Icon Files (*.ico)\0*.ico\0All Files (*.*)\0*.*\0", NULL, path, _countof(path)))
             {
                 SetWindowTextW(g_ui.icon_edit, path);
             }

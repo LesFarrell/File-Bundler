@@ -20,7 +20,7 @@ The same executable runs in two modes:
 
 ## Project Files
 
-- [file_bundler.c](file_bundler.c): application code, bundle writer/reader, extraction logic, and Win32 GUI
+- [filebundler.c](filebundler.c): application code, bundle writer/reader, extraction logic, and Win32 GUI
 - [premake5.lua](premake5.lua): Premake project generator for Visual Studio or MinGW-style builds
 - [application.ico](application.ico): default application icon
 - [application.rc](application.rc): Windows resource script
@@ -59,7 +59,7 @@ This builds the executable directly with `zig cc` as a Windows GUI application.
 The Premake configuration:
 
 - builds a 64-bit Windows GUI executable
-- compiles `file_bundler.c` together with the resource file
+- compiles `filebundler.c` together with the resource file
 - keeps `wWinMain()` as the Unicode entry point
 - links `cabinet`, `shell32`, `comdlg32`, `ole32`, and `user32`
 - tunes Release builds for smaller output

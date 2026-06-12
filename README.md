@@ -2,6 +2,8 @@
 
 `FileBundler.exe` is a native Win32 packer/launcher written in C.
 
+Copyright (c) 2026 Les Farrell.
+
 The same executable runs in two modes:
 
 - Builder mode: shows a GUI, copies itself, appends bundled file data, writes a manifest, and finishes with a footer.
@@ -211,3 +213,7 @@ Keys:
 - `apply_icon_to_exe()` only edits the copied output EXE, not the running builder executable.
 - Path handling is wide-char in the app, but manifest paths are stored as UTF-8.
 - Extraction code treats manifest metadata as untrusted input. Keep size checks and path-boundary checks strict.
+
+## Copyright
+
+Copyright (c) 2026 Les Farrell.

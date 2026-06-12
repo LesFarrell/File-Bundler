@@ -12,6 +12,8 @@
 #include <compressapi.h>
 
 #define APP_TITLE L"File Bundler"
+#define APP_VERSION L"1.0.0"
+#define APP_COPYRIGHT L"Copyright (c) 2026 Les Farrell"
 #define BUNDLE_MAGIC "BUNDLE01"
 #define BUNDLE_VERSION 1u
 #define BUNDLE_COMPRESSION_NONE 0u
@@ -24,6 +26,22 @@
 #define BUILDER_COMPRESSION_XPRESS_HUFF 2u
 #define PATH_BUFFER_CHARS (MAX_PATH * 4)
 #define STATUS_BUFFER_CHARS 2048
+
+#if defined(_WIN64)
+#define APP_BUILD_ARCH L"x64"
+#else
+#define APP_BUILD_ARCH L"x86"
+#endif
+
+#if defined(__clang__)
+#define APP_BUILD_COMPILER L"Clang-compatible"
+#elif defined(_MSC_VER)
+#define APP_BUILD_COMPILER L"MSVC-compatible"
+#elif defined(__GNUC__)
+#define APP_BUILD_COMPILER L"GCC-compatible"
+#else
+#define APP_BUILD_COMPILER L"Unknown compiler"
+#endif
 
 #define IDC_SOURCE_EDIT 1001
 #define IDC_SOURCE_BROWSE 1002
@@ -41,6 +59,7 @@
 #define IDC_COMPRESSION_XPRESS_HUFF_RADIO 1014
 #define IDC_BUILD_BUTTON 1015
 #define IDC_STATUS_EDIT 1016
+#define IDM_HELP_ABOUT 40001
 
 /* Describes one source file that will be embedded into the output bundle. */
 typedef struct
@@ -193,6 +212,7 @@ static BOOL extract_manifest_entry(FILE *bundle_file, const wchar_t *target_dir,
 static BOOL write_bundle_manifest(FILE *out_file, const FileList *files, const char *startup_utf8, uint32_t runtime_options, uint64_t *manifest_offset_out);
 static BOOL write_bundle_footer(FILE *out_file, uint64_t manifest_offset);
 static int app_main(HINSTANCE instance);
+static void show_about_dialog(HWND owner);
 
 static wchar_t *dup_wstr(const wchar_t *text)
 {
@@ -224,6 +244,26 @@ static char *utf8_from_wide(const wchar_t *text)
         return NULL;
     }
     return buffer;
+}
+
+static void show_about_dialog(HWND owner)
+{
+    wchar_t message[512];
+
+    swprintf(message, _countof(message),
+             L"%ls\n"
+             L"Version %ls\n"
+             L"\n"
+             L"%ls\n"
+             L"Build: %ls, %ls\n"
+             L"Bundle format: %u",
+             APP_TITLE,
+             APP_VERSION,
+             APP_COPYRIGHT,
+             APP_BUILD_ARCH,
+             APP_BUILD_COMPILER,
+             BUNDLE_VERSION);
+    MessageBoxW(owner, message, L"About File Bundler", MB_OK | MB_ICONINFORMATION);
 }
 
 static wchar_t *wide_from_utf8(const char *text)
@@ -2321,6 +2361,9 @@ static LRESULT CALLBACK main_wnd_proc(HWND window, UINT message, WPARAM wparam, 
             build_bundle(window);
             EnableWindow(g_ui.build_button, TRUE);
             return 0;
+        case IDM_HELP_ABOUT:
+            show_about_dialog(window);
+            return 0;
         }
         break;
     case WM_DESTROY:
@@ -2337,6 +2380,8 @@ static int run_builder_gui(HINSTANCE instance)
     WNDCLASSEXW wc = {0};
     MSG msg;
     HWND window;
+    HMENU menu_bar;
+    HMENU help_menu;
     // Load the embedded icon resource from the executable and use it for
     // both the large and small window class icons.
     HICON icon = LoadIconW(instance, MAKEINTRESOURCEW(1));
@@ -2352,7 +2397,15 @@ static int run_builder_gui(HINSTANCE instance)
     RegisterClassExW(&wc);
 
     window = CreateWindowExW(0, class_name, APP_TITLE, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 770, 610, NULL, NULL, instance, NULL);
+                             CW_USEDEFAULT, CW_USEDEFAULT, 770, 630, NULL, NULL, instance, NULL);
+    menu_bar = CreateMenu();
+    help_menu = CreatePopupMenu();
+    if (menu_bar && help_menu)
+    {
+        AppendMenuW(help_menu, MF_STRING, IDM_HELP_ABOUT, L"&About");
+        AppendMenuW(menu_bar, MF_POPUP, (UINT_PTR)help_menu, L"&Help");
+        SetMenu(window, menu_bar);
+    }
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
 

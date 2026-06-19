@@ -12,7 +12,7 @@
 #include <compressapi.h>
 
 #define APP_TITLE L"File Bundler"
-#define APP_VERSION L"1.0.0"
+#define APP_VERSION L"1.0.1"
 #define APP_COPYRIGHT L"Copyright (c) 2026 Les Farrell"
 #define BUNDLE_MAGIC "BUNDLE01"
 #define BUNDLE_VERSION 1u
@@ -26,22 +26,6 @@
 #define BUILDER_COMPRESSION_XPRESS_HUFF 2u
 #define PATH_BUFFER_CHARS (MAX_PATH * 4)
 #define STATUS_BUFFER_CHARS 2048
-
-#if defined(_WIN64)
-#define APP_BUILD_ARCH L"x64"
-#else
-#define APP_BUILD_ARCH L"x86"
-#endif
-
-#if defined(__clang__)
-#define APP_BUILD_COMPILER L"Clang-compatible"
-#elif defined(_MSC_VER)
-#define APP_BUILD_COMPILER L"MSVC-compatible"
-#elif defined(__GNUC__)
-#define APP_BUILD_COMPILER L"GCC-compatible"
-#else
-#define APP_BUILD_COMPILER L"Unknown compiler"
-#endif
 
 #define IDC_SOURCE_EDIT 1001
 #define IDC_SOURCE_BROWSE 1002
@@ -257,15 +241,10 @@ static void show_about_dialog(HWND owner)
              L"%ls\n"
              L"Version %ls\n"
              L"\n"
-             L"%ls\n"
-             L"Build: %ls, %ls\n"
-             L"Bundle format: %u",
+             L"%ls",
              APP_TITLE,
              APP_VERSION,
-             APP_COPYRIGHT,
-             APP_BUILD_ARCH,
-             APP_BUILD_COMPILER,
-             BUNDLE_VERSION);
+             APP_COPYRIGHT);
     MessageBoxW(owner, message, L"About File Bundler", MB_OK | MB_ICONINFORMATION);
 }
 

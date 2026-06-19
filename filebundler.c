@@ -207,11 +207,14 @@ static BOOL add_unique_path(PathList *list, const wchar_t *path);
 static BOOL get_temp_extract_directory(wchar_t *buffer, size_t buffer_count);
 static BOOL read_manifest_header(FILE *file, const BundleFooter *footer, uint32_t *file_count_out, uint32_t *startup_len_out, uint32_t *runtime_options_out);
 static void close_process_handles(PROCESS_INFORMATION *process_info);
+static size_t count_quoted_command_line_chars(const wchar_t *argument);
+static wchar_t *append_quoted_command_line_arg(wchar_t *dest, const wchar_t *argument);
+static wchar_t *build_child_command_line(const wchar_t *exe_path, const wchar_t *forwarded_args);
 static BOOL u64_fits_size_t(uint64_t value);
 static BOOL extract_manifest_entry(FILE *bundle_file, const wchar_t *target_dir, const ManifestEntry *entry, PathList *created_dirs);
 static BOOL write_bundle_manifest(FILE *out_file, const FileList *files, const char *startup_utf8, uint32_t runtime_options, uint64_t *manifest_offset_out);
 static BOOL write_bundle_footer(FILE *out_file, uint64_t manifest_offset);
-static int app_main(HINSTANCE instance);
+static int app_main(HINSTANCE instance, const wchar_t *command_line);
 static void show_about_dialog(HWND owner);
 
 static wchar_t *dup_wstr(const wchar_t *text)
@@ -798,6 +801,122 @@ static void close_process_handles(PROCESS_INFORMATION *process_info)
         CloseHandle(process_info->hProcess);
         process_info->hProcess = NULL;
     }
+}
+
+static size_t count_quoted_command_line_chars(const wchar_t *argument)
+{
+    const wchar_t *scan;
+    size_t trailing_backslashes = 0;
+    size_t total = 2; /* opening and closing quotes */
+    for (scan = argument; *scan; ++scan)
+    {
+        if (*scan == L'\\')
+        {
+            ++trailing_backslashes;
+            continue;
+        }
+        if (*scan == L'"')
+        {
+            total += (trailing_backslashes * 2) + 2;
+            trailing_backslashes = 0;
+            continue;
+        }
+        total += trailing_backslashes + 1;
+        trailing_backslashes = 0;
+    }
+    total += trailing_backslashes * 2;
+    return total;
+}
+
+static wchar_t *append_quoted_command_line_arg(wchar_t *dest, const wchar_t *argument)
+{
+    const wchar_t *scan;
+    size_t trailing_backslashes = 0;
+    *dest++ = L'"';
+    for (scan = argument; *scan; ++scan)
+    {
+        size_t i;
+        if (*scan == L'\\')
+        {
+            ++trailing_backslashes;
+            continue;
+        }
+        if (*scan == L'"')
+        {
+            for (i = 0; i < (trailing_backslashes * 2) + 1; ++i)
+            {
+                *dest++ = L'\\';
+            }
+            *dest++ = L'"';
+            trailing_backslashes = 0;
+            continue;
+        }
+        for (i = 0; i < trailing_backslashes; ++i)
+        {
+            *dest++ = L'\\';
+        }
+        *dest++ = *scan;
+        trailing_backslashes = 0;
+    }
+    while (trailing_backslashes-- > 0)
+    {
+        *dest++ = L'\\';
+        *dest++ = L'\\';
+    }
+    *dest++ = L'"';
+    *dest = L'\0';
+    return dest;
+}
+
+static wchar_t *build_child_command_line(const wchar_t *exe_path, const wchar_t *forwarded_args)
+{
+    LPWSTR *argv;
+    int argc = 0;
+    int i;
+    size_t total_chars;
+    wchar_t *command_line;
+    wchar_t *dest;
+    argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv)
+    {
+        size_t exe_len = wcslen(exe_path);
+        size_t args_len = forwarded_args ? wcslen(forwarded_args) : 0;
+        total_chars = exe_len + args_len + 4; /* quotes, optional space, terminator */
+        command_line = (wchar_t *)calloc(total_chars, sizeof(wchar_t));
+        if (!command_line)
+        {
+            return NULL;
+        }
+        if (args_len > 0)
+        {
+            swprintf(command_line, total_chars, L"\"%ls\" %ls", exe_path, forwarded_args);
+        }
+        else
+        {
+            swprintf(command_line, total_chars, L"\"%ls\"", exe_path);
+        }
+        return command_line;
+    }
+
+    total_chars = count_quoted_command_line_chars(exe_path) + 1;
+    for (i = 1; i < argc; ++i)
+    {
+        total_chars += 1 + count_quoted_command_line_chars(argv[i]);
+    }
+    command_line = (wchar_t *)calloc(total_chars, sizeof(wchar_t));
+    if (!command_line)
+    {
+        LocalFree(argv);
+        return NULL;
+    }
+    dest = append_quoted_command_line_arg(command_line, exe_path);
+    for (i = 1; i < argc; ++i)
+    {
+        *dest++ = L' ';
+        dest = append_quoted_command_line_arg(dest, argv[i]);
+    }
+    LocalFree(argv);
+    return command_line;
 }
 
 static BOOL u64_fits_size_t(uint64_t value)
@@ -1468,11 +1587,12 @@ static BOOL write_bundle_footer(FILE *out_file, uint64_t manifest_offset)
     return fwrite(&footer, sizeof(footer), 1, out_file) == 1;
 }
 
-static BOOL run_bundled_mode(HINSTANCE instance)
+static BOOL run_bundled_mode(HINSTANCE instance, const wchar_t *command_line)
 {
     wchar_t exe_path[PATH_BUFFER_CHARS];
     wchar_t extract_dir[PATH_BUFFER_CHARS];
     wchar_t *startup_relative = NULL;
+    wchar_t *child_command_line = NULL;
     wchar_t startup_full[PATH_BUFFER_CHARS];
     BundleFooter footer;
     PathList created_dirs = {0};
@@ -1555,14 +1675,26 @@ static BOOL run_bundled_mode(HINSTANCE instance)
         return TRUE;
     }
     free(startup_relative);
+    child_command_line = build_child_command_line(startup_full, command_line);
+    if (!child_command_line)
+    {
+        if (extract_to_temp && path_is_directory(extract_dir))
+        {
+            delete_directory_tree_recursive(extract_dir);
+        }
+        free_path_list(&created_dirs);
+        MessageBoxW(NULL, L"Could not build the startup command line.", APP_TITLE, MB_ICONERROR);
+        return TRUE;
+    }
     ZeroMemory(&si, sizeof(si));
     ZeroMemory(&pi, sizeof(pi));
     si.cb = sizeof(si);
-    if (!CreateProcessW(startup_full, NULL, NULL, NULL, FALSE, 0, NULL, extract_dir, &si, &pi))
+    if (!CreateProcessW(startup_full, child_command_line, NULL, NULL, FALSE, 0, NULL, extract_dir, &si, &pi))
     {
         wchar_t message[PATH_BUFFER_CHARS];
         swprintf(message, _countof(message), L"Could not launch:\n%ls", startup_full);
         MessageBoxW(NULL, message, APP_TITLE, MB_ICONERROR);
+        free(child_command_line);
         if (extract_to_temp && path_is_directory(extract_dir))
         {
             delete_directory_tree_recursive(extract_dir);
@@ -1570,6 +1702,7 @@ static BOOL run_bundled_mode(HINSTANCE instance)
         free_path_list(&created_dirs);
         return TRUE;
     }
+    free(child_command_line);
     /* In keep-files mode the child runs independently and the extracted tree is
        left in place for the user to inspect or reuse. */
     if (keep_files)
@@ -2417,10 +2550,10 @@ static int run_builder_gui(HINSTANCE instance)
     return (int)msg.wParam;
 }
 
-static int app_main(HINSTANCE instance)
+static int app_main(HINSTANCE instance, const wchar_t *command_line)
 {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    if (run_bundled_mode(instance))
+    if (run_bundled_mode(instance, command_line))
     {
         CoUninitialize();
         return 0;
@@ -2435,7 +2568,6 @@ static int app_main(HINSTANCE instance)
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_line, int show_cmd)
 {
     (void)prev_instance;
-    (void)command_line;
     (void)show_cmd;
-    return app_main(instance);
+    return app_main(instance, command_line);
 }

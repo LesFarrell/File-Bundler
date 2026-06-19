@@ -106,7 +106,7 @@ When running as a bundle:
 2. It reads the manifest and runtime option flags.
 3. It extracts files either beside the bundle or into a unique temp folder.
 4. If no startup EXE was stored, it stops after extraction and shows the destination folder.
-5. If a startup EXE was stored, it launches it with the extraction folder as the working directory.
+5. If a startup EXE was stored, it launches it with the extraction folder as the working directory and forwards any command-line arguments that were passed to the bundle.
 6. If `keep_files` is off, cleanup runs after the child process exits.
 7. If `keep_files` is on, the extracted files are left in place.
 

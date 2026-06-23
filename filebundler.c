@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <windows.h>
+#include <commctrl.h>
 #include <commdlg.h>
 #include <shlobj.h>
 #include <stdint.h>
@@ -43,7 +44,9 @@
 #define IDC_COMPRESSION_XPRESS_HUFF_RADIO 1014
 #define IDC_BUILD_BUTTON 1015
 #define IDC_STATUS_EDIT 1016
+#define IDC_PROGRESS_BAR 1017
 #define IDM_HELP_ABOUT 40001
+#define WM_APP_BUILD_COMPLETE (WM_APP + 1)
 
 /* Describes one source file that will be embedded into the output bundle. */
 typedef struct
@@ -156,9 +159,28 @@ typedef struct
     HWND compression_store_radio;
     HWND compression_xpress_radio;
     HWND compression_xpress_huff_radio;
+    HWND progress_bar;
     HWND status_edit;
     HWND build_button;
+    HWND main_window;
+    BOOL is_building;
 } UiState;
+
+typedef struct
+{
+    HWND window;
+} BuildThreadArgs;
+
+/* Small runtime-only window shown while a bundled EXE is extracting files. */
+typedef struct
+{
+    HWND window;
+    HWND status_label;
+    HWND file_label;
+    HWND progress_bar;
+    uint32_t total_files;
+    uint64_t total_bytes;
+} ExtractionProgressDialog;
 
 /* Result of locating an icon resource by either numeric id or string name. */
 typedef struct
@@ -200,6 +222,18 @@ static BOOL write_bundle_manifest(FILE *out_file, const FileList *files, const c
 static BOOL write_bundle_footer(FILE *out_file, uint64_t manifest_offset);
 static int app_main(HINSTANCE instance, const wchar_t *command_line);
 static void show_about_dialog(HWND owner);
+static BOOL build_bundle(HWND window);
+static void ensure_common_controls_initialized(void);
+static void pump_pending_messages(void);
+static LRESULT CALLBACK extraction_progress_wnd_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
+static BOOL create_extraction_progress_dialog(ExtractionProgressDialog *dialog, uint32_t total_files, uint64_t total_bytes);
+static void update_extraction_progress_dialog(ExtractionProgressDialog *dialog, uint32_t current_file_index, const wchar_t *relative_path, uint64_t completed_bytes);
+static void destroy_extraction_progress_dialog(ExtractionProgressDialog *dialog);
+static void scroll_status_to_end(HWND edit);
+static void set_build_controls_enabled(BOOL enabled);
+static void reset_build_progress(HWND window);
+static void update_build_progress(HWND window, size_t processed_files, size_t total_files, uint64_t processed_bytes, uint64_t total_bytes);
+static DWORD WINAPI build_bundle_thread_proc(LPVOID param);
 
 static wchar_t *dup_wstr(const wchar_t *text)
 {
@@ -637,6 +671,21 @@ static const wchar_t *compression_type_name(uint32_t compression_type)
 static void set_status(HWND edit, const wchar_t *text)
 {
     SetWindowTextW(edit, text);
+    scroll_status_to_end(edit);
+}
+
+static void scroll_status_to_end(HWND edit)
+{
+    LRESULT text_length;
+
+    if (!edit)
+    {
+        return;
+    }
+
+    text_length = GetWindowTextLengthW(edit);
+    SendMessageW(edit, EM_SETSEL, (WPARAM)text_length, (LPARAM)text_length);
+    SendMessageW(edit, EM_SCROLLCARET, 0, 0);
 }
 
 static void append_status(HWND edit, const wchar_t *format, ...)
@@ -663,7 +712,312 @@ static void append_status(HWND edit, const wchar_t *format, ...)
     }
     wcscat(existing, message);
     SetWindowTextW(edit, existing);
+    scroll_status_to_end(edit);
     free(existing);
+}
+
+/* Both the builder UI and the bundled-mode extractor use the common progress
+   bar control, so initialization is shared instead of being builder-only. */
+static void ensure_common_controls_initialized(void)
+{
+    static BOOL initialized = FALSE;
+
+    if (!initialized)
+    {
+        INITCOMMONCONTROLSEX common_controls = {0};
+        common_controls.dwSize = sizeof(common_controls);
+        common_controls.dwICC = ICC_PROGRESS_CLASS;
+        InitCommonControlsEx(&common_controls);
+        initialized = TRUE;
+    }
+}
+
+/* The extractor may run before the main GUI loop ever starts, so progress
+   updates explicitly drain pending paint/input messages for that dialog. */
+static void pump_pending_messages(void)
+{
+    MSG msg;
+
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+    {
+        if (msg.message == WM_QUIT)
+        {
+            PostQuitMessage((int)msg.wParam);
+            return;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
+
+static LRESULT CALLBACK extraction_progress_wnd_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    switch (message)
+    {
+    case WM_CLOSE:
+        return 0;
+    }
+
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+static BOOL create_extraction_progress_dialog(ExtractionProgressDialog *dialog, uint32_t total_files, uint64_t total_bytes)
+{
+    const wchar_t class_name[] = L"BundlerExtractionProgressWindow";
+    static BOOL class_registered = FALSE;
+    WNDCLASSEXW wc = {0};
+    HINSTANCE instance;
+    HICON icon;
+    HFONT gui_font;
+    int width = 540;
+    int height = 145;
+    int x;
+    int y;
+
+    if (!dialog)
+    {
+        return FALSE;
+    }
+
+    ensure_common_controls_initialized();
+    instance = GetModuleHandleW(NULL);
+    icon = LoadIconW(instance, MAKEINTRESOURCEW(1));
+
+    if (!class_registered)
+    {
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = extraction_progress_wnd_proc;
+        wc.hInstance = instance;
+        wc.lpszClassName = class_name;
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        wc.hIcon = icon;
+        wc.hIconSm = icon;
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        {
+            return FALSE;
+        }
+        class_registered = TRUE;
+    }
+
+    ZeroMemory(dialog, sizeof(*dialog));
+    dialog->total_files = total_files;
+    dialog->total_bytes = total_bytes;
+
+    x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
+    y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
+
+    dialog->window = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        class_name,
+        L"Extracting Bundle",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        x > 0 ? x : CW_USEDEFAULT,
+        y > 0 ? y : CW_USEDEFAULT,
+        width,
+        height,
+        NULL,
+        NULL,
+        instance,
+        NULL);
+    if (!dialog->window)
+    {
+        ZeroMemory(dialog, sizeof(*dialog));
+        return FALSE;
+    }
+
+    gui_font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    dialog->status_label = CreateWindowW(
+        L"STATIC",
+        L"Preparing extraction...",
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
+        16,
+        16,
+        490,
+        20,
+        dialog->window,
+        NULL,
+        instance,
+        NULL);
+    dialog->file_label = CreateWindowW(
+        L"STATIC",
+        L"",
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_PATHELLIPSIS | SS_NOPREFIX,
+        16,
+        42,
+        490,
+        34,
+        dialog->window,
+        NULL,
+        instance,
+        NULL);
+    dialog->progress_bar = CreateWindowExW(
+        0,
+        PROGRESS_CLASSW,
+        L"",
+        WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+        16,
+        84,
+        490,
+        20,
+        dialog->window,
+        NULL,
+        instance,
+        NULL);
+    if (!dialog->status_label || !dialog->file_label || !dialog->progress_bar)
+    {
+        destroy_extraction_progress_dialog(dialog);
+        return FALSE;
+    }
+
+    SendMessageW(dialog->status_label, WM_SETFONT, (WPARAM)gui_font, TRUE);
+    SendMessageW(dialog->file_label, WM_SETFONT, (WPARAM)gui_font, TRUE);
+    SendMessageW(dialog->progress_bar, PBM_SETRANGE32, 0, 1000);
+    SendMessageW(dialog->progress_bar, PBM_SETPOS, 0, 0);
+
+    ShowWindow(dialog->window, SW_SHOWNORMAL);
+    UpdateWindow(dialog->window);
+    pump_pending_messages();
+    return TRUE;
+}
+
+/* Progress advances on completed file bytes. This keeps the runtime dialog
+   simple, even though a single large file still only moves at file boundaries. */
+static void update_extraction_progress_dialog(ExtractionProgressDialog *dialog, uint32_t current_file_index, const wchar_t *relative_path, uint64_t completed_bytes)
+{
+    wchar_t status[128];
+    LRESULT scaled_position = 0;
+
+    if (!dialog || !dialog->window)
+    {
+        return;
+    }
+
+    if (dialog->total_files > 0 && current_file_index > dialog->total_files)
+    {
+        current_file_index = dialog->total_files;
+    }
+
+    if (dialog->total_files > 0)
+    {
+        swprintf(status, _countof(status), L"Extracting %u of %u", (unsigned)current_file_index, (unsigned)dialog->total_files);
+    }
+    else
+    {
+        wcscpy(status, L"Extracting files...");
+    }
+    SetWindowTextW(dialog->status_label, status);
+    SetWindowTextW(dialog->file_label, (relative_path && relative_path[0] != L'\0') ? relative_path : L"");
+
+    if (dialog->total_bytes > 0)
+    {
+        scaled_position = (LRESULT)((completed_bytes * 1000ull) / dialog->total_bytes);
+    }
+    else if (dialog->total_files > 0)
+    {
+        scaled_position = (LRESULT)(((uint64_t)current_file_index * 1000ull) / dialog->total_files);
+    }
+    if (scaled_position > 1000)
+    {
+        scaled_position = 1000;
+    }
+    SendMessageW(dialog->progress_bar, PBM_SETPOS, (WPARAM)scaled_position, 0);
+
+    RedrawWindow(dialog->window, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    pump_pending_messages();
+}
+
+static void destroy_extraction_progress_dialog(ExtractionProgressDialog *dialog)
+{
+    if (!dialog)
+    {
+        return;
+    }
+    if (dialog->window)
+    {
+        DestroyWindow(dialog->window);
+    }
+    ZeroMemory(dialog, sizeof(*dialog));
+    pump_pending_messages();
+}
+
+static void reset_build_progress(HWND window)
+{
+    (void)window;
+
+    if (!g_ui.progress_bar)
+    {
+        return;
+    }
+    SendMessageW(g_ui.progress_bar, PBM_SETRANGE32, 0, 1000);
+    SendMessageW(g_ui.progress_bar, PBM_SETPOS, 0, 0);
+}
+
+static void update_build_progress(HWND window, size_t processed_files, size_t total_files, uint64_t processed_bytes, uint64_t total_bytes)
+{
+    LRESULT scaled_position = 0;
+
+    (void)window;
+
+    if (!g_ui.progress_bar)
+    {
+        return;
+    }
+
+    if (total_bytes > 0)
+    {
+        scaled_position = (LRESULT)((processed_bytes * 1000ull) / total_bytes);
+    }
+    else if (total_files > 0)
+    {
+        scaled_position = (LRESULT)((processed_files * 1000ull) / total_files);
+    }
+
+    if (scaled_position > 1000)
+    {
+        scaled_position = 1000;
+    }
+
+    SendMessageW(g_ui.progress_bar, PBM_SETPOS, (WPARAM)scaled_position, 0);
+}
+
+static void set_build_controls_enabled(BOOL enabled)
+{
+    EnableWindow(g_ui.source_edit, enabled);
+    EnableWindow(g_ui.startup_edit, enabled);
+    EnableWindow(g_ui.output_edit, enabled);
+    EnableWindow(g_ui.output_name_edit, enabled);
+    EnableWindow(g_ui.icon_edit, enabled);
+    EnableWindow(g_ui.keep_files_check, enabled);
+    EnableWindow(g_ui.extract_to_temp_check, enabled);
+    EnableWindow(g_ui.compression_store_radio, enabled);
+    EnableWindow(g_ui.compression_xpress_radio, enabled);
+    EnableWindow(g_ui.compression_xpress_huff_radio, enabled);
+    EnableWindow(g_ui.build_button, enabled);
+}
+
+static DWORD WINAPI build_bundle_thread_proc(LPVOID param)
+{
+    BuildThreadArgs *args = (BuildThreadArgs *)param;
+    HWND window = NULL;
+    BOOL success;
+
+    if (!args)
+    {
+        return 0;
+    }
+
+    window = args->window;
+    free(args);
+
+    /* The actual build stays synchronous, but it runs on a worker thread so
+       the builder window can keep painting and processing input. */
+    success = build_bundle(window);
+    if (window)
+    {
+        PostMessageW(window, WM_APP_BUILD_COMPLETE, success ? 1u : 0u, 0);
+    }
+    return 0;
 }
 
 static BOOL path_exists(const wchar_t *path)
@@ -1199,7 +1553,11 @@ static BOOL extract_bundle_to_directory(const wchar_t *exe_path, const wchar_t *
     FILE *file = NULL;
     uint32_t file_count = 0;
     uint32_t i;
+    uint64_t total_file_bytes = 0;
+    uint64_t processed_file_bytes = 0;
     ManifestEntry *entries = NULL;
+    ExtractionProgressDialog progress = {0};
+    BOOL has_progress_dialog = FALSE;
     BOOL success = FALSE;
 
     file = _wfopen(exe_path, L"rb");
@@ -1212,17 +1570,38 @@ static BOOL extract_bundle_to_directory(const wchar_t *exe_path, const wchar_t *
         goto cleanup;
     }
 
+    for (i = 0; i < file_count; ++i)
+    {
+        total_file_bytes += entries[i].file_size;
+    }
+    /* Best-effort dialog: extraction still proceeds if the progress window
+       cannot be created in bundled mode. */
+    has_progress_dialog = create_extraction_progress_dialog(&progress, file_count, total_file_bytes);
+
     success = TRUE;
     for (i = 0; i < file_count; ++i)
     {
+        if (has_progress_dialog)
+        {
+            update_extraction_progress_dialog(&progress, i + 1, entries[i].relative_path, processed_file_bytes);
+        }
         if (!extract_manifest_entry(file, target_dir, &entries[i], created_dirs))
         {
             success = FALSE;
             break;
         }
+        processed_file_bytes += entries[i].file_size;
+        if (has_progress_dialog)
+        {
+            update_extraction_progress_dialog(&progress, i + 1, entries[i].relative_path, processed_file_bytes);
+        }
     }
 
 cleanup:
+    if (has_progress_dialog)
+    {
+        destroy_extraction_progress_dialog(&progress);
+    }
     free_manifest_entries(entries, file_count);
     if (file)
     {
@@ -1857,6 +2236,8 @@ static BOOL build_bundle(HWND window)
     char *startup_utf8 = NULL;
     uint64_t total_original = 0;
     uint64_t total_stored = 0;
+    uint64_t total_input_bytes = 0;
+    uint64_t processed_input_bytes = 0;
     uint32_t builder_compression_mode = BUILDER_COMPRESSION_XPRESS_HUFF;
     uint32_t runtime_options = 0;
     BOOL success = FALSE;
@@ -1879,6 +2260,7 @@ static BOOL build_bundle(HWND window)
     }
 
     set_status(g_ui.status_edit, L"");
+    reset_build_progress(window);
 
     if (source[0] == L'\0' || output_folder[0] == L'\0' || output_name[0] == L'\0')
     {
@@ -1959,7 +2341,12 @@ static BOOL build_bundle(HWND window)
         MessageBoxW(window, L"Bundle name cannot match a bundled root-level EXE filename. Choose a different bundle name so extraction does not overwrite the outer bundle EXE.", APP_TITLE, MB_ICONWARNING);
         goto cleanup;
     }
+    for (i = 0; i < files.count; ++i)
+    {
+        total_input_bytes += files.items[i].size;
+    }
     append_status(g_ui.status_edit, L"Found %zu files", files.count);
+    update_build_progress(window, 0, files.count, 0, total_input_bytes);
 
     if (!ensure_parent_directories(output, NULL))
     {
@@ -2044,7 +2431,7 @@ static BOOL build_bundle(HWND window)
             saved_percent = ((double)(files.items[i].size - files.items[i].stored_size) * 100.0) /
                             (double)files.items[i].size;
         }
-        append_status(g_ui.status_edit, L"Packing %S (%ls, %.1f%% saved)", files.items[i].relative_utf8,
+        append_status(g_ui.status_edit, L"Packing %zu/%zu: %S (%ls, %.1f%% saved)", i + 1, files.count, files.items[i].relative_utf8,
                       compression_type_name(files.items[i].compression_type), saved_percent);
         if (!write_buffer(out_file, stored.data, stored.size))
         {
@@ -2053,6 +2440,8 @@ static BOOL build_bundle(HWND window)
             goto cleanup;
         }
         free_buffer(&stored);
+        processed_input_bytes += files.items[i].size;
+        update_build_progress(window, i + 1, files.count, processed_input_bytes, total_input_bytes);
     }
 
     if (startup[0] != L'\0')
@@ -2077,6 +2466,7 @@ static BOOL build_bundle(HWND window)
 
     append_status(g_ui.status_edit, L"Bundle complete. Stored %llu of %llu bytes.",
                   (unsigned long long)total_stored, (unsigned long long)total_original);
+    update_build_progress(window, files.count, files.count, total_input_bytes, total_input_bytes);
     MessageBoxW(window, L"Bundle created successfully.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
     success = TRUE;
 
@@ -2391,6 +2781,7 @@ static void pick_startup_exe(HWND owner)
 
 static void create_child_controls(HWND window)
 {
+    g_ui.main_window = window;
     CreateWindowW(L"STATIC", L"Source Folder", WS_CHILD | WS_VISIBLE, 16, 18, 120, 20, window, NULL, NULL, NULL);
     g_ui.source_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 16, 40, 600, 24, window, (HMENU)IDC_SOURCE_EDIT, NULL, NULL);
     CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE, 626, 38, 110, 24, window, (HMENU)IDC_SOURCE_BROWSE, NULL, NULL);
@@ -2422,6 +2813,9 @@ static void create_child_controls(HWND window)
     CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE, 626, 384, 110, 24, window, (HMENU)IDC_ICON_BROWSE, NULL, NULL);
 
     g_ui.build_button = CreateWindowW(L"BUTTON", L"Build Bundle", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 16, 422, 140, 30, window, (HMENU)IDC_BUILD_BUTTON, NULL, NULL);
+    g_ui.progress_bar = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE | PBS_SMOOTH, 170, 428, 566, 18, window, (HMENU)IDC_PROGRESS_BAR, NULL, NULL);
+    SendMessageW(g_ui.progress_bar, PBM_SETRANGE32, 0, 1000);
+    SendMessageW(g_ui.progress_bar, PBM_SETPOS, 0, 0);
     g_ui.status_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL, 16, 468, 720, 90, window, (HMENU)IDC_STATUS_EDIT, NULL, NULL);
     load_ui_state();
 }
@@ -2432,6 +2826,14 @@ static LRESULT CALLBACK main_wnd_proc(HWND window, UINT message, WPARAM wparam, 
     {
     case WM_CREATE:
         create_child_controls(window);
+        return 0;
+    case WM_CLOSE:
+        if (g_ui.is_building)
+        {
+            MessageBoxW(window, L"A bundle build is still running. Wait for it to finish before closing the app.", APP_TITLE, MB_ICONINFORMATION);
+            return 0;
+        }
+        DestroyWindow(window);
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wparam))
@@ -2468,16 +2870,50 @@ static LRESULT CALLBACK main_wnd_proc(HWND window, UINT message, WPARAM wparam, 
             return 0;
         }
         case IDC_BUILD_BUTTON:
-            EnableWindow(g_ui.build_button, FALSE);
+        {
+            BuildThreadArgs *args;
+            HANDLE thread;
+
+            if (g_ui.is_building)
+            {
+                return 0;
+            }
+
             save_ui_state();
-            build_bundle(window);
-            EnableWindow(g_ui.build_button, TRUE);
+            set_build_controls_enabled(FALSE);
+            g_ui.is_building = TRUE;
+
+            args = (BuildThreadArgs *)calloc(1, sizeof(*args));
+            if (!args)
+            {
+                g_ui.is_building = FALSE;
+                set_build_controls_enabled(TRUE);
+                MessageBoxW(window, L"Could not start the background build thread.", APP_TITLE, MB_ICONERROR);
+                return 0;
+            }
+            args->window = window;
+
+            thread = CreateThread(NULL, 0, build_bundle_thread_proc, args, 0, NULL);
+            if (!thread)
+            {
+                free(args);
+                g_ui.is_building = FALSE;
+                set_build_controls_enabled(TRUE);
+                MessageBoxW(window, L"Could not start the background build thread.", APP_TITLE, MB_ICONERROR);
+                return 0;
+            }
+            CloseHandle(thread);
             return 0;
+        }
         case IDM_HELP_ABOUT:
             show_about_dialog(window);
             return 0;
         }
         break;
+    case WM_APP_BUILD_COMPLETE:
+        g_ui.is_building = FALSE;
+        set_build_controls_enabled(TRUE);
+        return 0;
     case WM_DESTROY:
         save_ui_state();
         PostQuitMessage(0);
@@ -2497,6 +2933,8 @@ static int run_builder_gui(HINSTANCE instance)
     // Load the embedded icon resource from the executable and use it for
     // both the large and small window class icons.
     HICON icon = LoadIconW(instance, MAKEINTRESOURCEW(1));
+
+    ensure_common_controls_initialized();
 
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = main_wnd_proc;

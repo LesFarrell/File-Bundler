@@ -28,12 +28,16 @@ The same executable runs in two modes:
 - [filebundler.c](filebundler.c): application code, bundle writer/reader, extraction logic, and Win32 GUI
 - [premake5.lua](premake5.lua): Premake project generator for Visual Studio or MinGW-style builds
 - [application.ico](application.ico): default application icon
-- [application.rc](application.rc): Windows resource script
+- [application.rc](application.rc): Windows resource script for the icon, version info, and dialog layouts
+- [resource.h](resource.h): shared resource and control ids used by C code and the resource script
 
 ## Requirements
 
 - Windows
-- Premake5 plus a supported compiler toolchain, for generated projects
+- Premake5 plus a supported compiler toolchain, if you want generated projects
+- Or a direct toolchain setup for the batch scripts:
+  - GCC or Zig
+  - `windres`
 
 The program depends on standard Win32 libraries plus:
 
@@ -57,13 +61,21 @@ Generate GNU Make files:
 premake5 gmake
 ```
 
+### Direct Batch Builds
+
+Build with GCC:
+
+```bat
+build_gcc.bat
+```
+
 Build with Zig:
 
 ```bat
 build_zig.bat
 ```
 
-This builds the executable directly with `zig cc` as a Windows GUI application.
+These scripts build the executable directly without generating project files first.
 
 The Premake configuration:
 
@@ -136,11 +148,11 @@ Builder UI modes:
 
 Compression is applied per file. For `XPRESS` and `XPRESS_HUFF`, the builder only keeps the compressed payload when it is smaller than the original file. Otherwise that file is stored raw.
 
-Progress reporting also follows the per-file model:
+Progress reporting mostly follows the per-file model:
 
 - Builder progress advances as each file finishes packing.
-- Runtime extraction progress advances as each file finishes extracting.
-- A single very large file shows its name immediately, but the bar only moves again when that file completes.
+- Runtime extraction progress updates the current filename immediately and advances within each file while bytes are written out.
+- Compressed files may still pause briefly while decompression finishes before the write phase catches up.
 
 On-disk bundle compression codes are:
 

@@ -18,15 +18,18 @@ project "file_bundler"
     objdir ("build/obj/" .. _ACTION .. "/%{cfg.platform}/%{cfg.buildcfg}")
 
     files {
-        "file_bundler.c",
+        "filebundler.c",
         "application.rc",
         "application.ico",
+        "resource.h",
     }
 
     links {
         "cabinet",
         "shell32",
+        "comctl32",
         "comdlg32",
+        "gdi32",
         "ole32",
         "user32",
     }

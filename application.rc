@@ -1,6 +1,57 @@
+#include <windows.h>
+#include <commctrl.h>
 #include <winver.h>
+#include "resource.h"
 
-1 ICON "application.ico"
+IDI_APP_ICON ICON "application.ico"
+
+IDD_MAIN_DIALOG DIALOGEX 0, 0, 430, 315
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+CAPTION "File Bundler"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "Source Folder", -1, 9, 5, 69, 11
+    EDITTEXT        IDC_SOURCE_EDIT, 9, 16, 343, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_SOURCE_BROWSE, 358, 15, 63, 14
+
+    LTEXT           "Startup EXE Inside Folder (optional)", -1, 9, 36, 143, 11
+    EDITTEXT        IDC_STARTUP_EDIT, 9, 47, 343, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Pick EXE...", IDC_STARTUP_BROWSE, 358, 46, 63, 14
+
+    LTEXT           "Output Folder", -1, 9, 66, 103, 11
+    EDITTEXT        IDC_OUTPUT_EDIT, 9, 78, 343, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_OUTPUT_BROWSE, 358, 77, 63, 14
+
+    LTEXT           "Bundle Name", -1, 9, 97, 103, 11
+    EDITTEXT        IDC_OUTPUT_NAME_EDIT, 9, 109, 189, 14, ES_AUTOHSCROLL
+    LTEXT           ".exe", -1, 202, 110, 23, 11
+
+    AUTOCHECKBOX    "Keep extracted files.", IDC_KEEP_FILES_CHECK, 9, 127, 149, 12
+    AUTOCHECKBOX    "Extract to temp folder.", IDC_EXTRACT_TO_TEMP_CHECK, 9, 141, 183, 12
+
+    LTEXT           "Compression level", -1, 9, 159, 103, 11
+    AUTORADIOBUTTON "Store only", IDC_COMPRESSION_STORE_RADIO, 9, 171, 69, 12, WS_GROUP
+    AUTORADIOBUTTON "Quick", IDC_COMPRESSION_XPRESS_RADIO, 86, 171, 57, 12
+    AUTORADIOBUTTON "Best", IDC_COMPRESSION_XPRESS_HUFF_RADIO, 151, 171, 86, 12
+
+    LTEXT           "Bundle icon (.ico, optional)", -1, 9, 189, 143, 11
+    EDITTEXT        IDC_ICON_EDIT, 9, 201, 343, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_ICON_BROWSE, 358, 200, 63, 14
+
+    DEFPUSHBUTTON   "Build Bundle", IDC_BUILD_BUTTON, 9, 220, 80, 18
+    CONTROL         "", IDC_PROGRESS_BAR, "msctls_progress32", WS_VISIBLE | PBS_SMOOTH, 97, 224, 324, 11
+    EDITTEXT        IDC_STATUS_EDIT, 9, 244, 412, 55, ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL
+END
+
+IDD_EXTRACTION_PROGRESS DIALOGEX 0, 0, 299, 57
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Extracting Bundle"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT   "Preparing extraction...", IDC_EXTRACTION_STATUS, 9, 9, 280, 11, SS_NOPREFIX
+    LTEXT   "", IDC_EXTRACTION_FILE, 9, 18, 280, 10, SS_PATHELLIPSIS | SS_NOPREFIX
+    CONTROL "", IDC_PROGRESS_BAR, "msctls_progress32", WS_VISIBLE | PBS_SMOOTH, 9, 29, 280, 16
+END
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,0,0,0

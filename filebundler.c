@@ -14,7 +14,7 @@
 #include "resource.h"
 
 #define APP_TITLE L"File Bundler"
-#define APP_VERSION L"1.0.1"
+#define APP_VERSION L"1.0.2"
 #define APP_COPYRIGHT L"Copyright (c) 2026 Les Farrell"
 #define BUNDLE_MAGIC "BUNDLE01"
 #define BUNDLE_VERSION 1u
@@ -28,7 +28,24 @@
 #define BUILDER_COMPRESSION_XPRESS_HUFF 2u
 #define PATH_BUFFER_CHARS (MAX_PATH * 4)
 #define STATUS_BUFFER_CHARS 2048
+/* Larger extraction writes reduce per-chunk UI and stdio overhead in bundled
+   mode without changing the on-disk bundle format. */
+#define EXTRACTION_IO_CHUNK_BYTES (1024 * 1024)
 #define WM_APP_BUILD_COMPLETE (WM_APP + 1)
+
+typedef enum
+{
+    BUILD_RESULT_FAILED = 0,
+    BUILD_RESULT_SUCCEEDED = 1,
+    BUILD_RESULT_CANCELLED = 2
+} BuildResult;
+
+typedef enum
+{
+    EXTRACTION_RESULT_FAILED = 0,
+    EXTRACTION_RESULT_SUCCEEDED = 1,
+    EXTRACTION_RESULT_CANCELLED = 2
+} ExtractionResult;
 
 /* Describes one source file that will be embedded into the output bundle. */
 typedef struct
@@ -132,10 +149,14 @@ typedef struct
 typedef struct
 {
     HWND source_edit;
+    HWND source_browse_button;
     HWND startup_edit;
+    HWND startup_browse_button;
     HWND output_edit;
+    HWND output_browse_button;
     HWND output_name_edit;
     HWND icon_edit;
+    HWND icon_browse_button;
     HWND keep_files_check;
     HWND extract_to_temp_check;
     HWND compression_store_radio;
@@ -144,8 +165,10 @@ typedef struct
     HWND progress_bar;
     HWND status_edit;
     HWND build_button;
+    HWND cancel_build_button;
     HWND main_window;
     BOOL is_building;
+    volatile LONG cancel_requested;
 } UiState;
 
 typedef struct
@@ -153,7 +176,8 @@ typedef struct
     HWND window;
 } BuildThreadArgs;
 
-/* Small runtime-only window shown while a bundled EXE is extracting files. */
+/* Small runtime-only window shown while a bundled EXE is extracting files.
+   Closing it requests extraction cancellation and cleanup. */
 typedef struct
 {
     HWND window;
@@ -165,6 +189,7 @@ typedef struct
     uint32_t displayed_file_index;
     LRESULT displayed_scaled_position;
     DWORD last_pump_tick;
+    volatile LONG cancel_requested;
 } ExtractionProgressDialog;
 
 /* Result of locating an icon resource by either numeric id or string name. */
@@ -207,15 +232,19 @@ static BOOL write_bundle_manifest(FILE *out_file, const FileList *files, const c
 static BOOL write_bundle_footer(FILE *out_file, uint64_t manifest_offset);
 static int app_main(HINSTANCE instance, const wchar_t *command_line);
 static void show_about_dialog(HWND owner);
-static BOOL build_bundle(HWND window);
+static BuildResult build_bundle(HWND window);
 static void ensure_common_controls_initialized(void);
 static void pump_pending_messages(void);
 static INT_PTR CALLBACK extraction_progress_dlg_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 static BOOL create_extraction_progress_dialog(ExtractionProgressDialog *dialog, uint32_t total_files, uint64_t total_bytes);
 static void update_extraction_progress_dialog(ExtractionProgressDialog *dialog, uint32_t current_file_index, const wchar_t *relative_path, uint64_t completed_bytes, BOOL force_paint);
 static void destroy_extraction_progress_dialog(ExtractionProgressDialog *dialog);
+static BOOL is_extraction_cancel_requested(ExtractionProgressDialog *dialog);
 static void scroll_status_to_end(HWND edit);
 static void set_build_controls_enabled(BOOL enabled);
+static void request_build_cancel(void);
+static void reset_build_cancel_request(void);
+static BOOL is_build_cancel_requested(void);
 static void reset_build_progress(HWND window);
 static void update_build_progress(HWND window, size_t processed_files, size_t total_files, uint64_t processed_bytes, uint64_t total_bytes);
 static DWORD WINAPI build_bundle_thread_proc(LPVOID param);
@@ -532,12 +561,16 @@ static BOOL copy_file_range_with_progress(FILE *src,
                                           const wchar_t *relative_path,
                                           uint64_t completed_bytes_base)
 {
-    unsigned char buffer[256 * 1024];
+    unsigned char buffer[EXTRACTION_IO_CHUNK_BYTES];
     uint64_t remaining = size;
     uint64_t copied = 0;
 
     while (remaining > 0)
     {
+        if (is_extraction_cancel_requested(progress))
+        {
+            return FALSE;
+        }
         size_t chunk_size = remaining > sizeof(buffer) ? sizeof(buffer) : (size_t)remaining;
         if (fread(buffer, 1, chunk_size, src) != chunk_size)
         {
@@ -552,6 +585,10 @@ static BOOL copy_file_range_with_progress(FILE *src,
         if (progress)
         {
             update_extraction_progress_dialog(progress, current_file_index, relative_path, completed_bytes_base + copied, FALSE);
+            if (is_extraction_cancel_requested(progress))
+            {
+                return FALSE;
+            }
         }
     }
 
@@ -566,11 +603,15 @@ static BOOL write_buffer_with_progress(FILE *dst,
                                        const wchar_t *relative_path,
                                        uint64_t completed_bytes_base)
 {
-    const size_t chunk_size = 256 * 1024;
+    const size_t chunk_size = EXTRACTION_IO_CHUNK_BYTES;
     size_t written = 0;
 
     while (written < size)
     {
+        if (is_extraction_cancel_requested(progress))
+        {
+            return FALSE;
+        }
         size_t current_chunk_size = size - written;
         if (current_chunk_size > chunk_size)
         {
@@ -584,6 +625,10 @@ static BOOL write_buffer_with_progress(FILE *dst,
         if (progress)
         {
             update_extraction_progress_dialog(progress, current_file_index, relative_path, completed_bytes_base + (uint64_t)written, FALSE);
+            if (is_extraction_cancel_requested(progress))
+            {
+                return FALSE;
+            }
         }
     }
 
@@ -824,15 +869,41 @@ static void center_window_on_screen(HWND window)
     SetWindowPos(window, NULL, x > 0 ? x : 0, y > 0 ? y : 0, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER);
 }
 
+static BOOL is_extraction_cancel_requested(ExtractionProgressDialog *dialog)
+{
+    return dialog && InterlockedCompareExchange(&dialog->cancel_requested, 0, 0) != 0;
+}
+
 static INT_PTR CALLBACK extraction_progress_dlg_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
+    ExtractionProgressDialog *dialog = (ExtractionProgressDialog *)GetWindowLongPtrW(window, GWLP_USERDATA);
+
     (void)wparam;
-    (void)lparam;
 
     switch (message)
     {
-    case WM_CLOSE:
+    case WM_INITDIALOG:
+        dialog = (ExtractionProgressDialog *)lparam;
+        SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)dialog);
         return TRUE;
+    case WM_CLOSE:
+        if (dialog)
+        {
+            /* Closing the runtime progress dialog is treated as an explicit
+               cancel request so bundled-mode cleanup can remove partial output. */
+            InterlockedExchange(&dialog->cancel_requested, 1);
+        }
+        DestroyWindow(window);
+        return TRUE;
+    case WM_NCDESTROY:
+        if (dialog)
+        {
+            dialog->window = NULL;
+            dialog->status_label = NULL;
+            dialog->file_label = NULL;
+            dialog->progress_bar = NULL;
+        }
+        break;
     }
 
     return FALSE;
@@ -858,7 +929,7 @@ static BOOL create_extraction_progress_dialog(ExtractionProgressDialog *dialog, 
     dialog->displayed_file_index = UINT32_MAX;
     dialog->displayed_scaled_position = -1;
 
-    dialog->window = CreateDialogParamW(instance, MAKEINTRESOURCEW(IDD_EXTRACTION_PROGRESS), NULL, extraction_progress_dlg_proc, 0);
+    dialog->window = CreateDialogParamW(instance, MAKEINTRESOURCEW(IDD_EXTRACTION_PROGRESS), NULL, extraction_progress_dlg_proc, (LPARAM)dialog);
     if (!dialog->window)
     {
         ZeroMemory(dialog, sizeof(*dialog));
@@ -890,7 +961,8 @@ static BOOL create_extraction_progress_dialog(ExtractionProgressDialog *dialog, 
 }
 
 /* Progress advances on completed file bytes. This keeps the runtime dialog
-   smoother by throttling message pumps and only repainting changed controls. */
+   smoother by throttling message pumps and only repainting changed controls,
+   while still giving the extraction loops regular cancellation checkpoints. */
 static void update_extraction_progress_dialog(ExtractionProgressDialog *dialog,
                                               uint32_t current_file_index,
                                               const wchar_t *relative_path,
@@ -1014,23 +1086,43 @@ static void update_build_progress(HWND window, size_t processed_files, size_t to
 static void set_build_controls_enabled(BOOL enabled)
 {
     EnableWindow(g_ui.source_edit, enabled);
+    EnableWindow(g_ui.source_browse_button, enabled);
     EnableWindow(g_ui.startup_edit, enabled);
+    EnableWindow(g_ui.startup_browse_button, enabled);
     EnableWindow(g_ui.output_edit, enabled);
+    EnableWindow(g_ui.output_browse_button, enabled);
     EnableWindow(g_ui.output_name_edit, enabled);
     EnableWindow(g_ui.icon_edit, enabled);
+    EnableWindow(g_ui.icon_browse_button, enabled);
     EnableWindow(g_ui.keep_files_check, enabled);
     EnableWindow(g_ui.extract_to_temp_check, enabled);
     EnableWindow(g_ui.compression_store_radio, enabled);
     EnableWindow(g_ui.compression_xpress_radio, enabled);
     EnableWindow(g_ui.compression_xpress_huff_radio, enabled);
     EnableWindow(g_ui.build_button, enabled);
+    EnableWindow(g_ui.cancel_build_button, !enabled);
+}
+
+static void request_build_cancel(void)
+{
+    InterlockedExchange(&g_ui.cancel_requested, 1);
+}
+
+static void reset_build_cancel_request(void)
+{
+    InterlockedExchange(&g_ui.cancel_requested, 0);
+}
+
+static BOOL is_build_cancel_requested(void)
+{
+    return InterlockedCompareExchange(&g_ui.cancel_requested, 0, 0) != 0;
 }
 
 static DWORD WINAPI build_bundle_thread_proc(LPVOID param)
 {
     BuildThreadArgs *args = (BuildThreadArgs *)param;
     HWND window = NULL;
-    BOOL success;
+    BuildResult result = BUILD_RESULT_FAILED;
 
     if (!args)
     {
@@ -1042,10 +1134,10 @@ static DWORD WINAPI build_bundle_thread_proc(LPVOID param)
 
     /* The actual build stays synchronous, but it runs on a worker thread so
        the builder window can keep painting and processing input. */
-    success = build_bundle(window);
+    result = build_bundle(window);
     if (window)
     {
-        PostMessageW(window, WM_APP_BUILD_COMPLETE, success ? 1u : 0u, 0);
+        PostMessageW(window, WM_APP_BUILD_COMPLETE, (WPARAM)result, 0);
     }
     return 0;
 }
@@ -1136,12 +1228,16 @@ static uint32_t get_builder_compression_mode(void)
     return BUILDER_COMPRESSION_XPRESS_HUFF;
 }
 
+/* Persisted compression settings may be missing or invalid on first launch.
+   Falling back to Store keeps new bundles optimized for the fastest startup and
+   extraction path unless the user explicitly chooses a denser codec. */
 static void set_builder_compression_mode(uint32_t compression_mode)
 {
     if (compression_mode != BUILDER_COMPRESSION_STORE &&
-        compression_mode != BUILDER_COMPRESSION_XPRESS)
+        compression_mode != BUILDER_COMPRESSION_XPRESS &&
+        compression_mode != BUILDER_COMPRESSION_XPRESS_HUFF)
     {
-        compression_mode = BUILDER_COMPRESSION_XPRESS_HUFF;
+        compression_mode = BUILDER_COMPRESSION_STORE;
     }
 
     SendMessageW(g_ui.compression_store_radio, BM_SETCHECK,
@@ -1598,7 +1694,7 @@ cleanup:
     return success;
 }
 
-static BOOL extract_bundle_to_directory(const wchar_t *exe_path, const wchar_t *target_dir, const BundleFooter *footer, wchar_t **startup_path_out, uint32_t *runtime_options_out, PathList *created_dirs)
+static ExtractionResult extract_bundle_to_directory(const wchar_t *exe_path, const wchar_t *target_dir, const BundleFooter *footer, wchar_t **startup_path_out, uint32_t *runtime_options_out, PathList *created_dirs)
 {
     FILE *file = NULL;
     uint32_t file_count = 0;
@@ -1608,12 +1704,12 @@ static BOOL extract_bundle_to_directory(const wchar_t *exe_path, const wchar_t *
     ManifestEntry *entries = NULL;
     ExtractionProgressDialog progress = {0};
     BOOL has_progress_dialog = FALSE;
-    BOOL success = FALSE;
+    ExtractionResult result = EXTRACTION_RESULT_FAILED;
 
     file = _wfopen(exe_path, L"rb");
     if (!file)
     {
-        return FALSE;
+        return EXTRACTION_RESULT_FAILED;
     }
     if (!read_manifest_entries(file, footer, startup_path_out, runtime_options_out, &entries, &file_count))
     {
@@ -1625,15 +1721,26 @@ static BOOL extract_bundle_to_directory(const wchar_t *exe_path, const wchar_t *
         total_file_bytes += entries[i].file_size;
     }
     /* Best-effort dialog: extraction still proceeds if the progress window
-       cannot be created in bundled mode. */
+       cannot be created in bundled mode. When it is shown, closing it cancels
+       extraction and unwinds through the normal cleanup path. */
     has_progress_dialog = create_extraction_progress_dialog(&progress, file_count, total_file_bytes);
 
-    success = TRUE;
+    result = EXTRACTION_RESULT_SUCCEEDED;
     for (i = 0; i < file_count; ++i)
     {
+        if (has_progress_dialog && is_extraction_cancel_requested(&progress))
+        {
+            result = EXTRACTION_RESULT_CANCELLED;
+            break;
+        }
         if (has_progress_dialog)
         {
             update_extraction_progress_dialog(&progress, i + 1, entries[i].relative_path, processed_file_bytes, TRUE);
+            if (is_extraction_cancel_requested(&progress))
+            {
+                result = EXTRACTION_RESULT_CANCELLED;
+                break;
+            }
         }
         if (!extract_manifest_entry(file,
                                     target_dir,
@@ -1643,13 +1750,20 @@ static BOOL extract_bundle_to_directory(const wchar_t *exe_path, const wchar_t *
                                     i + 1,
                                     processed_file_bytes))
         {
-            success = FALSE;
+            result = has_progress_dialog && is_extraction_cancel_requested(&progress)
+                         ? EXTRACTION_RESULT_CANCELLED
+                         : EXTRACTION_RESULT_FAILED;
             break;
         }
         processed_file_bytes += entries[i].file_size;
         if (has_progress_dialog)
         {
             update_extraction_progress_dialog(&progress, i + 1, entries[i].relative_path, processed_file_bytes, TRUE);
+            if (is_extraction_cancel_requested(&progress))
+            {
+                result = EXTRACTION_RESULT_CANCELLED;
+                break;
+            }
         }
     }
 
@@ -1663,7 +1777,7 @@ cleanup:
     {
         fclose(file);
     }
-    return success;
+    return result;
 }
 
 static void delete_directory_tree_recursive(const wchar_t *dir_path)
@@ -1728,6 +1842,8 @@ static void cleanup_extracted_files(const wchar_t *exe_path, const wchar_t *targ
     }
     if (created_dirs)
     {
+        /* Remove directories in reverse creation order so nested extraction
+           trees collapse cleanly after partial or complete cleanup. */
         for (i = (uint32_t)created_dirs->count; i > 0; --i)
         {
             if (path_is_directory(created_dirs->items[i - 1]))
@@ -2011,6 +2127,7 @@ static BOOL run_bundled_mode(HINSTANCE instance, const wchar_t *command_line)
     BundleFooter footer;
     PathList created_dirs = {0};
     uint32_t runtime_options = 0;
+    ExtractionResult extraction_result = EXTRACTION_RESULT_FAILED;
     BOOL keep_files = FALSE;
     BOOL extract_to_temp = FALSE;
     STARTUPINFOW si;
@@ -2056,14 +2173,25 @@ static BOOL run_bundled_mode(HINSTANCE instance, const wchar_t *command_line)
         *last_slash = L'\0';
     }
 
-    if (!extract_bundle_to_directory(exe_path, extract_dir, &footer, &startup_relative, &runtime_options, &created_dirs))
+    extraction_result = extract_bundle_to_directory(exe_path, extract_dir, &footer, &startup_relative, &runtime_options, &created_dirs);
+    if (extraction_result != EXTRACTION_RESULT_SUCCEEDED)
     {
-        MessageBoxW(NULL, L"Extraction failed.", APP_TITLE, MB_ICONERROR);
         if (extract_to_temp && path_is_directory(extract_dir))
         {
             delete_directory_tree_recursive(extract_dir);
         }
+        else
+        {
+            /* Cancels and hard failures both reuse the same manifest-driven
+               cleanup when extraction happens beside the bundle. */
+            cleanup_extracted_files(exe_path, extract_dir, &footer, &created_dirs);
+        }
+        free(startup_relative);
         free_path_list(&created_dirs);
+        if (extraction_result == EXTRACTION_RESULT_FAILED)
+        {
+            MessageBoxW(NULL, L"Extraction failed.", APP_TITLE, MB_ICONERROR);
+        }
         return TRUE;
     }
     keep_files = (runtime_options & BUNDLE_OPTION_KEEP_FILES) != 0;
@@ -2273,7 +2401,7 @@ static BOOL apply_icon_source_to_exe(const wchar_t *exe_path, const wchar_t *ico
     return FALSE;
 }
 
-static BOOL build_bundle(HWND window)
+static BuildResult build_bundle(HWND window)
 {
     wchar_t source[PATH_BUFFER_CHARS];
     wchar_t startup[PATH_BUFFER_CHARS];
@@ -2294,9 +2422,10 @@ static BOOL build_bundle(HWND window)
     uint64_t total_stored = 0;
     uint64_t total_input_bytes = 0;
     uint64_t processed_input_bytes = 0;
-    uint32_t builder_compression_mode = BUILDER_COMPRESSION_XPRESS_HUFF;
+    uint32_t builder_compression_mode = BUILDER_COMPRESSION_STORE;
     uint32_t runtime_options = 0;
-    BOOL success = FALSE;
+    BuildResult result = BUILD_RESULT_FAILED;
+    BOOL output_created = FALSE;
 
     GetWindowTextW(g_ui.source_edit, source, _countof(source));
     GetWindowTextW(g_ui.startup_edit, startup, _countof(startup));
@@ -2321,27 +2450,27 @@ static BOOL build_bundle(HWND window)
     if (source[0] == L'\0' || output_folder[0] == L'\0' || output_name[0] == L'\0')
     {
         MessageBoxW(window, L"Pick a source folder, output folder, and bundle name first.", APP_TITLE, MB_ICONWARNING);
-        return FALSE;
+        return BUILD_RESULT_FAILED;
     }
     if (!path_is_directory(source))
     {
         MessageBoxW(window, L"The source folder does not exist.", APP_TITLE, MB_ICONWARNING);
-        return FALSE;
+        return BUILD_RESULT_FAILED;
     }
     if (!path_is_directory(output_folder))
     {
         MessageBoxW(window, L"The output folder does not exist.", APP_TITLE, MB_ICONWARNING);
-        return FALSE;
+        return BUILD_RESULT_FAILED;
     }
     if (!bundle_name_is_valid(output_name))
     {
         MessageBoxW(window, L"Bundle name cannot be empty or contain invalid filename characters.", APP_TITLE, MB_ICONWARNING);
-        return FALSE;
+        return BUILD_RESULT_FAILED;
     }
     if (!path_is_relative(startup))
     {
         MessageBoxW(window, L"Startup EXE must be a path relative to the source folder.", APP_TITLE, MB_ICONWARNING);
-        return FALSE;
+        return BUILD_RESULT_FAILED;
     }
     if (startup[0] != L'\0')
     {
@@ -2351,34 +2480,34 @@ static BOOL build_bundle(HWND window)
             !path_has_extension(startup_full_path, L".exe"))
         {
             MessageBoxW(window, L"Startup EXE must point to an .exe inside the source folder.", APP_TITLE, MB_ICONWARNING);
-            return FALSE;
+            return BUILD_RESULT_FAILED;
         }
     }
     if (bundle_name_conflicts_with_startup_exe(output_name, startup))
     {
         MessageBoxW(window, L"Bundle name cannot match the startup EXE name. Choose a different bundle name so the generated EXE does not conflict with the file it will run.", APP_TITLE, MB_ICONWARNING);
-        return FALSE;
+        return BUILD_RESULT_FAILED;
     }
     if (icon[0] != L'\0' && !path_exists(icon))
     {
         MessageBoxW(window, L"The icon source could not be found.", APP_TITLE, MB_ICONWARNING);
-        return FALSE;
+        return BUILD_RESULT_FAILED;
     }
     if (icon[0] != L'\0' && !path_has_extension(icon, L".ico"))
     {
         MessageBoxW(window, L"Custom icon source must be an .ico file.", APP_TITLE, MB_ICONWARNING);
-        return FALSE;
+        return BUILD_RESULT_FAILED;
     }
     if (!GetModuleFileNameW(NULL, self_path, _countof(self_path)))
     {
         MessageBoxW(window, L"Could not locate the builder executable.", APP_TITLE, MB_ICONERROR);
-        return FALSE;
+        return BUILD_RESULT_FAILED;
     }
     swprintf(output, _countof(output), L"%ls\\%ls.exe", output_folder, output_name);
     if (path_is_within_directory(output, source))
     {
         MessageBoxW(window, L"Output bundle must be outside the source folder. This prevents the generated EXE and custom icon update from overwriting bundled source files.", APP_TITLE, MB_ICONWARNING);
-        return FALSE;
+        return BUILD_RESULT_FAILED;
     }
 
     append_status(g_ui.status_edit, L"Scanning %ls", source);
@@ -2403,6 +2532,11 @@ static BOOL build_bundle(HWND window)
     }
     append_status(g_ui.status_edit, L"Found %zu files", files.count);
     update_build_progress(window, 0, files.count, 0, total_input_bytes);
+    if (is_build_cancel_requested())
+    {
+        result = BUILD_RESULT_CANCELLED;
+        goto cleanup;
+    }
 
     if (!ensure_parent_directories(output, NULL))
     {
@@ -2414,7 +2548,13 @@ static BOOL build_bundle(HWND window)
         MessageBoxW(window, L"Could not copy the builder EXE to the output location.", APP_TITLE, MB_ICONERROR);
         goto cleanup;
     }
+    output_created = TRUE;
     append_status(g_ui.status_edit, L"Created base bundle %ls", output);
+    if (is_build_cancel_requested())
+    {
+        result = BUILD_RESULT_CANCELLED;
+        goto cleanup;
+    }
 
     if (icon[0] != L'\0')
     {
@@ -2449,6 +2589,11 @@ static BOOL build_bundle(HWND window)
         {
             append_status(g_ui.status_edit, L"Bundle icon inherited from the startup EXE.");
         }
+        if (is_build_cancel_requested())
+        {
+            result = BUILD_RESULT_CANCELLED;
+            goto cleanup;
+        }
     }
 
     out_file = _wfopen(output, L"rb+");
@@ -2469,6 +2614,11 @@ static BOOL build_bundle(HWND window)
     {
         Buffer stored = {0};
         double saved_percent = 0.0;
+        if (is_build_cancel_requested())
+        {
+            result = BUILD_RESULT_CANCELLED;
+            goto cleanup;
+        }
         if (!get_stream_position_u64(out_file, &files.items[i].data_offset))
         {
             MessageBoxW(window, L"Could not determine the output EXE write position.", APP_TITLE, MB_ICONERROR);
@@ -2489,6 +2639,12 @@ static BOOL build_bundle(HWND window)
         }
         append_status(g_ui.status_edit, L"Packing %zu/%zu: %S (%ls, %.1f%% saved)", i + 1, files.count, files.items[i].relative_utf8,
                       compression_type_name(files.items[i].compression_type), saved_percent);
+        if (is_build_cancel_requested())
+        {
+            free_buffer(&stored);
+            result = BUILD_RESULT_CANCELLED;
+            goto cleanup;
+        }
         if (!write_buffer(out_file, stored.data, stored.size))
         {
             free_buffer(&stored);
@@ -2500,6 +2656,11 @@ static BOOL build_bundle(HWND window)
         update_build_progress(window, i + 1, files.count, processed_input_bytes, total_input_bytes);
     }
 
+    if (is_build_cancel_requested())
+    {
+        result = BUILD_RESULT_CANCELLED;
+        goto cleanup;
+    }
     if (startup[0] != L'\0')
     {
         startup_utf8 = utf8_from_wide(startup);
@@ -2523,17 +2684,32 @@ static BOOL build_bundle(HWND window)
     append_status(g_ui.status_edit, L"Bundle complete. Stored %llu of %llu bytes.",
                   (unsigned long long)total_stored, (unsigned long long)total_original);
     update_build_progress(window, files.count, files.count, total_input_bytes, total_input_bytes);
-    MessageBoxW(window, L"Bundle created successfully.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
-    success = TRUE;
+    result = BUILD_RESULT_SUCCEEDED;
 
 cleanup:
     if (out_file)
     {
         fclose(out_file);
     }
+    if (result == BUILD_RESULT_CANCELLED)
+    {
+        append_status(g_ui.status_edit, L"Build cancelled.");
+        if (output_created && path_exists(output))
+        {
+            if (DeleteFileW(output))
+            {
+                append_status(g_ui.status_edit, L"Removed partial bundle %ls", output);
+            }
+            else
+            {
+                append_status(g_ui.status_edit, L"Build cancelled, but the partial bundle could not be removed: %ls", output);
+            }
+        }
+        reset_build_progress(window);
+    }
     free(startup_utf8);
     free_file_list(&files);
-    return success;
+    return result;
 }
 
 static BOOL pick_folder(HWND owner, wchar_t *buffer)
@@ -2678,6 +2854,9 @@ static BOOL get_state_file_path(wchar_t *buffer, size_t buffer_count)
     DWORD path_len;
     size_t current_len;
 
+    /* The builder keeps its sidecar INI beside the executable so portable
+       copies carry their UI state with them. The embedded app manifest keeps
+       Windows from silently redirecting that file into VirtualStore. */
     path_len = GetModuleFileNameW(NULL, buffer, (DWORD)buffer_count);
     if (!path_len || path_len >= buffer_count)
     {
@@ -2769,7 +2948,7 @@ static void load_ui_state(void)
         SendMessageW(g_ui.extract_to_temp_check, BM_SETCHECK, BST_UNCHECKED, 0);
     }
     set_builder_compression_mode((uint32_t)GetPrivateProfileIntW(
-        L"builder", L"compression_mode", BUILDER_COMPRESSION_XPRESS_HUFF, path));
+        L"builder", L"compression_mode", BUILDER_COMPRESSION_STORE, path));
 }
 
 static void save_ui_state(void)
@@ -2839,24 +3018,33 @@ static void bind_main_dialog_controls(HWND window)
 {
     g_ui.main_window = window;
     g_ui.source_edit = GetDlgItem(window, IDC_SOURCE_EDIT);
+    g_ui.source_browse_button = GetDlgItem(window, IDC_SOURCE_BROWSE);
     g_ui.startup_edit = GetDlgItem(window, IDC_STARTUP_EDIT);
+    g_ui.startup_browse_button = GetDlgItem(window, IDC_STARTUP_BROWSE);
     g_ui.output_edit = GetDlgItem(window, IDC_OUTPUT_EDIT);
+    g_ui.output_browse_button = GetDlgItem(window, IDC_OUTPUT_BROWSE);
     g_ui.output_name_edit = GetDlgItem(window, IDC_OUTPUT_NAME_EDIT);
     g_ui.icon_edit = GetDlgItem(window, IDC_ICON_EDIT);
+    g_ui.icon_browse_button = GetDlgItem(window, IDC_ICON_BROWSE);
     g_ui.keep_files_check = GetDlgItem(window, IDC_KEEP_FILES_CHECK);
     g_ui.extract_to_temp_check = GetDlgItem(window, IDC_EXTRACT_TO_TEMP_CHECK);
     g_ui.compression_store_radio = GetDlgItem(window, IDC_COMPRESSION_STORE_RADIO);
     g_ui.compression_xpress_radio = GetDlgItem(window, IDC_COMPRESSION_XPRESS_RADIO);
     g_ui.compression_xpress_huff_radio = GetDlgItem(window, IDC_COMPRESSION_XPRESS_HUFF_RADIO);
     g_ui.build_button = GetDlgItem(window, IDC_BUILD_BUTTON);
+    g_ui.cancel_build_button = GetDlgItem(window, IDC_CANCEL_BUILD_BUTTON);
     g_ui.progress_bar = GetDlgItem(window, IDC_PROGRESS_BAR);
     g_ui.status_edit = GetDlgItem(window, IDC_STATUS_EDIT);
 
-    if (!g_ui.source_edit || !g_ui.startup_edit || !g_ui.output_edit ||
-        !g_ui.output_name_edit || !g_ui.icon_edit || !g_ui.keep_files_check ||
-        !g_ui.extract_to_temp_check || !g_ui.compression_store_radio ||
-        !g_ui.compression_xpress_radio || !g_ui.compression_xpress_huff_radio ||
-        !g_ui.build_button || !g_ui.progress_bar || !g_ui.status_edit)
+    if (!g_ui.source_edit || !g_ui.source_browse_button ||
+        !g_ui.startup_edit || !g_ui.startup_browse_button ||
+        !g_ui.output_edit || !g_ui.output_browse_button ||
+        !g_ui.output_name_edit || !g_ui.icon_edit || !g_ui.icon_browse_button ||
+        !g_ui.keep_files_check || !g_ui.extract_to_temp_check ||
+        !g_ui.compression_store_radio || !g_ui.compression_xpress_radio ||
+        !g_ui.compression_xpress_huff_radio || !g_ui.build_button ||
+        !g_ui.cancel_build_button ||
+        !g_ui.progress_bar || !g_ui.status_edit)
     {
         MessageBoxW(window, L"Could not bind the dialog controls.", APP_TITLE, MB_ICONERROR);
         DestroyWindow(window);
@@ -2865,6 +3053,7 @@ static void bind_main_dialog_controls(HWND window)
 
     SendMessageW(g_ui.progress_bar, PBM_SETRANGE32, 0, 1000);
     SendMessageW(g_ui.progress_bar, PBM_SETPOS, 0, 0);
+    EnableWindow(g_ui.cancel_build_button, FALSE);
     load_ui_state();
 }
 
@@ -2891,7 +3080,7 @@ static INT_PTR CALLBACK main_dlg_proc(HWND window, UINT message, WPARAM wparam, 
     case WM_CLOSE:
         if (g_ui.is_building)
         {
-            MessageBoxW(window, L"A bundle build is still running. Wait for it to finish before closing the app.", APP_TITLE, MB_ICONINFORMATION);
+            MessageBoxW(window, L"A bundle build is still running. Cancel it first or wait for it to finish before closing the app.", APP_TITLE, MB_ICONINFORMATION);
             return TRUE;
         }
         DestroyWindow(window);
@@ -2941,6 +3130,7 @@ static INT_PTR CALLBACK main_dlg_proc(HWND window, UINT message, WPARAM wparam, 
             }
 
             save_ui_state();
+            reset_build_cancel_request();
             set_build_controls_enabled(FALSE);
             g_ui.is_building = TRUE;
 
@@ -2966,6 +3156,14 @@ static INT_PTR CALLBACK main_dlg_proc(HWND window, UINT message, WPARAM wparam, 
             CloseHandle(thread);
             return TRUE;
         }
+        case IDC_CANCEL_BUILD_BUTTON:
+            if (g_ui.is_building && !is_build_cancel_requested())
+            {
+                request_build_cancel();
+                EnableWindow(g_ui.cancel_build_button, FALSE);
+                append_status(g_ui.status_edit, L"Cancelling build after the current file finishes...");
+            }
+            return TRUE;
         case IDM_HELP_ABOUT:
             show_about_dialog(window);
             return TRUE;
@@ -2973,7 +3171,16 @@ static INT_PTR CALLBACK main_dlg_proc(HWND window, UINT message, WPARAM wparam, 
         break;
     case WM_APP_BUILD_COMPLETE:
         g_ui.is_building = FALSE;
+        reset_build_cancel_request();
         set_build_controls_enabled(TRUE);
+        if ((BuildResult)wparam == BUILD_RESULT_SUCCEEDED)
+        {
+            MessageBoxW(window, L"Bundle created successfully.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
+        }
+        else if ((BuildResult)wparam == BUILD_RESULT_CANCELLED)
+        {
+            MessageBoxW(window, L"Build cancelled.", APP_TITLE, MB_OK | MB_ICONINFORMATION);
+        }
         return TRUE;
     case WM_DESTROY:
         save_ui_state();

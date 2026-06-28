@@ -3,6 +3,10 @@
 #include <winver.h>
 #include "resource.h"
 
+/* Embed the app manifest so sidecar writes such as FileBundler.ini target the
+   real executable directory instead of a virtualized per-user path. */
+1 24 "app.manifest"
+
 IDI_APP_ICON ICON "application.ico"
 
 IDD_MAIN_DIALOG DIALOGEX 0, 0, 430, 315
@@ -12,34 +16,35 @@ FONT 9, "Segoe UI"
 BEGIN
     LTEXT           "Source Folder", -1, 9, 5, 69, 11
     EDITTEXT        IDC_SOURCE_EDIT, 9, 16, 343, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "Browse...", IDC_SOURCE_BROWSE, 358, 15, 63, 14
+    PUSHBUTTON      "Browse...", IDC_SOURCE_BROWSE, 355, 15, 63, 14, BS_FLAT
 
     LTEXT           "Startup EXE Inside Folder (optional)", -1, 9, 36, 143, 11
     EDITTEXT        IDC_STARTUP_EDIT, 9, 47, 343, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "Pick EXE...", IDC_STARTUP_BROWSE, 358, 46, 63, 14
+    PUSHBUTTON      "Pick EXE...", IDC_STARTUP_BROWSE, 355, 46, 63, 14, BS_FLAT
 
     LTEXT           "Output Folder", -1, 9, 66, 103, 11
     EDITTEXT        IDC_OUTPUT_EDIT, 9, 78, 343, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "Browse...", IDC_OUTPUT_BROWSE, 358, 77, 63, 14
+    PUSHBUTTON      "Browse...", IDC_OUTPUT_BROWSE, 355, 77, 63, 14, BS_FLAT
 
     LTEXT           "Bundle Name", -1, 9, 97, 103, 11
     EDITTEXT        IDC_OUTPUT_NAME_EDIT, 9, 109, 189, 14, ES_AUTOHSCROLL
     LTEXT           ".exe", -1, 202, 110, 23, 11
 
-    AUTOCHECKBOX    "Keep extracted files.", IDC_KEEP_FILES_CHECK, 9, 127, 149, 12
-    AUTOCHECKBOX    "Extract to temp folder.", IDC_EXTRACT_TO_TEMP_CHECK, 9, 141, 183, 12
+    AUTOCHECKBOX    "Keep extracted files.", IDC_KEEP_FILES_CHECK, 9, 127, 149, 12, BS_FLAT
+    AUTOCHECKBOX    "Extract to temp folder.", IDC_EXTRACT_TO_TEMP_CHECK, 9, 141, 183, 12, BS_FLAT
 
     LTEXT           "Compression level", -1, 9, 159, 103, 11
-    AUTORADIOBUTTON "Store only", IDC_COMPRESSION_STORE_RADIO, 9, 171, 69, 12, WS_GROUP
-    AUTORADIOBUTTON "Quick", IDC_COMPRESSION_XPRESS_RADIO, 86, 171, 57, 12
-    AUTORADIOBUTTON "Best", IDC_COMPRESSION_XPRESS_HUFF_RADIO, 151, 171, 86, 12
+    AUTORADIOBUTTON "Store only", IDC_COMPRESSION_STORE_RADIO, 9, 171, 69, 12, WS_GROUP | BS_FLAT
+    AUTORADIOBUTTON "Quick", IDC_COMPRESSION_XPRESS_RADIO, 86, 171, 57, 12, BS_FLAT
+    AUTORADIOBUTTON "Best", IDC_COMPRESSION_XPRESS_HUFF_RADIO, 151, 171, 86, 12, BS_FLAT
 
     LTEXT           "Bundle icon (.ico, optional)", -1, 9, 189, 143, 11
     EDITTEXT        IDC_ICON_EDIT, 9, 201, 343, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "Browse...", IDC_ICON_BROWSE, 358, 200, 63, 14
+    PUSHBUTTON      "Browse...", IDC_ICON_BROWSE, 355, 200, 63, 14, BS_FLAT
 
-    DEFPUSHBUTTON   "Build Bundle", IDC_BUILD_BUTTON, 9, 220, 80, 18
-    CONTROL         "", IDC_PROGRESS_BAR, "msctls_progress32", WS_VISIBLE | PBS_SMOOTH, 97, 224, 324, 11
+    DEFPUSHBUTTON   "Build Bundle", IDC_BUILD_BUTTON, 9, 220, 80, 18, BS_FLAT
+    PUSHBUTTON      "Cancel Build", IDC_CANCEL_BUILD_BUTTON, 95, 220, 74, 18, BS_FLAT
+    CONTROL         "", IDC_PROGRESS_BAR, "msctls_progress32", WS_VISIBLE | PBS_SMOOTH, 177, 224, 244, 11
     EDITTEXT        IDC_STATUS_EDIT, 9, 244, 412, 55, ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL
 END
 
@@ -54,8 +59,8 @@ BEGIN
 END
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION 1,0,2,0
+ PRODUCTVERSION 1,0,2,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -72,12 +77,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Les Farrell\0"
             VALUE "FileDescription", "File Bundler\0"
-            VALUE "FileVersion", "1.0.0\0"
+            VALUE "FileVersion", "1.0.2\0"
             VALUE "InternalName", "FileBundler.exe\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Les Farrell\0"
             VALUE "OriginalFilename", "FileBundler.exe\0"
             VALUE "ProductName", "File Bundler\0"
-            VALUE "ProductVersion", "1.0.0\0"
+            VALUE "ProductVersion", "1.0.2\0"
         END
     END
     BLOCK "VarFileInfo"

@@ -20,7 +20,9 @@ The same executable runs in two modes:
 - If no custom `.ico` is selected, inherits the startup EXE icon when one is configured
 - Shows a progress bar and auto-scrolling status log while building
 - Runs bundle creation on a background thread so the builder window stays responsive
+- Lets you cancel a running build from the builder UI
 - Shows a small progress dialog while a bundle is extracting at startup
+- Treats closing the extraction dialog as a cancel request and removes partial extracted output
 - Persists the builder UI state in an `.ini` file beside the executable
 
 ## Project Files
@@ -99,7 +101,8 @@ Builds output `FileBundler.exe` in the repo root.
 8. Click `Build Bundle`.
 9. Watch the progress bar and status log while files are packed.
 
-During a build, the builder disables its input controls, keeps the window responsive, and auto-scrolls the status log to the newest line.
+During a build, the builder disables its input controls, enables `Cancel Build`, keeps the window responsive, and auto-scrolls the status log to the newest line.
+Build cancellation takes effect after the current file finishes processing.
 
 ## Builder Rules
 
@@ -128,15 +131,17 @@ When running as a bundle:
 2. It reads the manifest and runtime option flags.
 3. It opens a small extraction dialog with the current file path and a progress bar.
 4. It extracts files either beside the bundle or into a unique temp folder.
-5. If no startup EXE was stored, it closes the progress dialog, stops after extraction, and shows the destination folder.
-6. If a startup EXE was stored, it closes the progress dialog, launches it with the extraction folder as the working directory, and forwards any command-line arguments that were passed to the bundle.
-7. If `keep_files` is off, cleanup runs after the child process exits.
-8. If `keep_files` is on, the extracted files are left in place.
+5. If you close that extraction dialog, extraction is cancelled and any partially extracted output is removed before the bundle exits.
+6. If no startup EXE was stored, it closes the progress dialog, stops after extraction, and shows the destination folder.
+7. If a startup EXE was stored, it closes the progress dialog, launches it with the extraction folder as the working directory, and forwards any command-line arguments that were passed to the bundle.
+8. If `keep_files` is off, cleanup runs after the child process exits.
+9. If `keep_files` is on, the extracted files are left in place.
 
 Cleanup behavior depends on extraction mode:
 
 - Temp extraction: the temp directory is deleted recursively.
 - Extraction beside the bundle: files listed in the manifest are deleted, empty parent directories are removed, and extraction-created directories are cleaned up.
+- Extraction cancellation: the same cleanup rules are applied immediately to any partial output.
 
 ## Compression
 
@@ -146,12 +151,15 @@ Builder UI modes:
 - `XPRESS`
 - `XPRESS_HUFF`
 
+New builder sessions default to `Store only` so generated bundles extract as fast as possible. You can still switch to `XPRESS` or `XPRESS_HUFF` when smaller output matters more than launch speed.
+
 Compression is applied per file. For `XPRESS` and `XPRESS_HUFF`, the builder only keeps the compressed payload when it is smaller than the original file. Otherwise that file is stored raw.
 
 Progress reporting mostly follows the per-file model:
 
 - Builder progress advances as each file finishes packing.
 - Runtime extraction progress updates the current filename immediately and advances within each file while bytes are written out.
+- Closing the runtime extraction dialog cancels during those chunked write/copy checkpoints.
 - Compressed files may still pause briefly while decompression finishes before the write phase catches up.
 
 On-disk bundle compression codes are:
@@ -223,6 +231,7 @@ Notes:
 ## Persisted State
 
 The builder stores UI state in an `.ini` file beside the executable under the `[builder]` section.
+The app ships with an embedded manifest so Windows writes that sidecar file to the real executable folder instead of silently redirecting it into `VirtualStore`.
 
 Keys:
 
